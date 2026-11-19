@@ -37,6 +37,7 @@ import { useLiveStatus } from '../lib/live-status';
 import { ApprovalDock, SCOPE } from '../components/ApprovalCard';
 import { artifactFromUrl, type PreviewArtifact } from '../lib/artifacts';
 import { openExternal } from '../lib/open-external';
+import { api } from '../lib/client';
 import { busyPlan, isLiveFollowUp, parkedReady } from '../lib/while-busy';
 import { composeNumbered, composeQuoted, parseQuoted, rememberQuoteSources, type Quote, type QuoteSource } from '../lib/quotes';
 /** Chat — talk to the one loaded model. */
@@ -452,6 +453,7 @@ export function ChatScreen() {
     }, [setupVisible, readyForChat, session?.id, messageCount]);
     function submit() {
         const text = draft.trim();
+        if (text === '/pause-for-update') { updateDraft(''); void pauseForUpdate(); return; }
         if (!text && !queuedPhotos.length)
             return;
         if (streaming) {
@@ -570,6 +572,16 @@ interface SlashCommand {
     icon: IconName;
     run: () => void;
 }
+async function pauseForUpdate() {
+    pushToast('info', 'Saving agent work and preparing the update…');
+    try {
+        const result = await api.post<{ checkpoint: string; receipts: { chatId: string; helperId?: string }[] }>('/api/chat/pause-for-update', {});
+        const agents = result.receipts.map(row => (row.helperId ?? row.chatId) + ' ✓');
+        pushToast('info', 'Agent work saved. Ready for update.', [...agents, result.checkpoint].join('\n'));
+    } catch (error) {
+        pushToast('error', 'Update preparation failed', error instanceof Error ? error.message : String(error));
+    }
+}
 function useSlashCommands(clear: () => void, setDraft: (value: string) => void): SlashCommand[] {
     const demo = useStore(s => s.library?.mode === 'simulated');
     return [
@@ -581,6 +593,7 @@ function useSlashCommands(clear: () => void, setDraft: (value: string) => void):
         { id: 'loop', label: '/loop', hint: 'Repeat a message every few minutes while this chat is open', icon: 'refresh', run: () => setDraft('/loop 10m ') },
         { id: 'website', label: '/website', hint: 'Open a website in the preview sidebar', icon: 'link', run: () => { clear(); window.dispatchEvent(new Event('strata:open-website')); } },
         { id: 'preview', label: '/preview', hint: 'Open a local file in the preview sidebar', icon: 'file', run: () => { clear(); window.dispatchEvent(new Event('strata:open-preview')); } },
+        { id: 'pause-for-update', label: '/pause-for-update', hint: 'Save progress and pause all agents for an update', icon: 'stop', run: () => { clear(); void pauseForUpdate(); } },
         ...(demo ? [{ id: 'subagents', label: '/subagents', hint: 'Preview subagent statistics', icon: 'experts' as const, run: () => { clear(); createSubagentExample(); } }] : []),
         ...getSlashCommands().map(command => ({ ...command, run: () => { clear(); command.run(); } }))
     ];

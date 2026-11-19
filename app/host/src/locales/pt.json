@@ -3594,5 +3594,9 @@
   "s9154": "Mensagens para este ajudante",
   "s9155": "A mensagem foi enviada, mas não pôde ser guardada no histórico.",
   "s9156": "Não foi possível atualizar nenhum ajudante. Os ajudantes ativos têm de terminar ou ser parados primeiro.",
-  "s9157": "Restaure este ajudante antes de lhe enviar uma mensagem."
+  "s9157": "Restaure este ajudante antes de lhe enviar uma mensagem.",
+  "updatePause0": "Salvar o progresso e pausar todos os agentes para atualizar",
+  "updatePause1": "Salvando o trabalho e preparando a atualização…",
+  "updatePause2": "Trabalho salvo. Tudo pronto para atualizar.",
+  "updatePause3": "Falha ao preparar a atualização"
 }
