@@ -302,7 +302,7 @@ const THINKING_COMPAT = { supportsStore: false, thinkingFormat: 'chat-template',
 // the same request hides the missing answer and can take six model calls to report it.
 const AGENT_RETRY_POLICY = { mode: 'normal', retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'], backoff: {} };
 
-export function buildProfile({ local = [], connections = [], gate = true, tools = NO_TOOLS_SETTINGS, skillsDir = null, proxyBase = null, searchMock = null, defaultLocalId = null, workingMemory = false }) {
+export function buildProfile({ local = [], connections = [], gate = true, tools = NO_TOOLS_SETTINGS, skillsDir = null, proxyBase = null, searchMock = null, defaultLocalId = null, workingMemory = false, contextOptimizer = null }) {
   const providers = {};
   const env = {};
   const routes = [];
@@ -445,7 +445,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
     // Its web question names the search service the person chose (a keyed one only when its key is saved), and the person's switch skips the question.
     ...(gate ? [{ insert: [{ id: 'strata-gate', name: GATE_PLUGIN, config: { web: { provider: SEARCH_NAMES[keyed ?? 'builtin'], skipAsk: tools.webWithoutAsking === true }, blocked: tools.blockedFolders ?? [] } }] }] : []),
     // Compaction decides from what the model server measured, and its summary requests always fit the window (plugins/strata-context.mjs).
-    { insert: [{ id: 'strata-context', name: CONTEXT_PLUGIN, config: {} }] },
+    { insert: [{ id: 'strata-context', name: CONTEXT_PLUGIN, config: contextOptimizer?.enabled ? { contextOptimizer } : {} }] },
     ...(workingMemory ? [{ insert: [
       { id: 'strata-working-memory', name: WORKING_MEMORY_PLUGIN, config: {} },
       { id: 'strata-edit-recovery', name: EDIT_RECOVERY_PLUGIN, config: {} },
@@ -476,7 +476,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
   // The approval gate's own settings are in it too (the blocked folders, the search service it names, whether web needs no question): the gate reads them once, when the
   // Harness starts, so a change in Settings -> Tools reaches the next message only if it restarts the Harness (SAFETY: a blocked folder was not enforced until the host restarted).
   const gateEntry = entries.find(e => e.insert?.some(x => x.id === 'strata-gate')) ?? null;
-  const toolsSignature = createHash('sha256').update(JSON.stringify([mcp, ownRows, webRows, entries.find(e => e.id === 'preset-standard'), gateEntry, env.STRATA_SEARCH_KEY ?? '', mcpEnv])).digest('hex').slice(0, 16);
+  const toolsSignature = createHash('sha256').update(JSON.stringify([mcp, ownRows, webRows, entries.find(e => e.id === 'preset-standard'), gateEntry, env.STRATA_SEARCH_KEY ?? '', mcpEnv, ...(contextOptimizer?.enabled ? [contextOptimizer] : [])])).digest('hex').slice(0, 16);
   return { patch, env, routes, defaultRoute, signature, toolsSignature, shapeTargets, mcpSkipped };
 }
 

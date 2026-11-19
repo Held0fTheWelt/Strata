@@ -18,6 +18,7 @@ import { materializeSkills, parseSkillFile, skillSlug, writeCreatedSkill } from 
 import { systemFonts } from './fonts.mjs';
 import { tuningDir } from './platform-paths.mjs';
 import { createAgentBridge, plainTurnFailure } from './agent/agent-bridge.mjs';
+import { contextOptimizerSettings, probeContextOptimizer, savedContextOptimizer } from './agent/context-optimizer.mjs';
 import { connectionReasoningEfforts, mcpSkippedNotices, setCompactionChoice, compactionNumber, thresholdRatio, headroomFraction, compactionThreshold, localOutputBudget, DEFAULT_THRESHOLD_RATIO, DEFAULT_HEADROOM_FRACTION } from './agent/profile.mjs';
 import { createAgentTools } from './agent/tools-settings.mjs';
 import { withPlainStatus } from './agent/status.mjs';
@@ -200,7 +201,9 @@ async function pictureRefusal(connection, model) {
   const fix = `open Settings → Models, edit "${connection.name}" and turn on "Read pictures with this model"`;
   return `"${model.name}" is set not to read pictures (or its server says it cannot: a llama-server started without --mmproj, or a text-only model). If that is wrong, ${fix}. Otherwise choose a model that reads pictures.`;
 }
+const optimizerSettings = () => savedContextOptimizer(store.get().agentChat?.contextOptimizer);
 const agent = createAgentBridge({
+  contextOptimizer: optimizerSettings,
   tools: () => agentTools.profileView(),
   skillsDir: () => AGENT_SKILLS,
   onGoal: (chatId, goal) => hub.send('goal', { chatId, goal }),
@@ -1989,6 +1992,28 @@ async function api(req, res, path, method, url) {
   }
   // When the assistant summarises an old part of a chat (Settings -> Chat). null puts a name back to automatic;
   // the running assistant picks the new number up on its next message (it is part of the profile's signature).
+  if (path === '/api/agent/context-optimizer' || path === '/api/agent/context-optimizer/test') {
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
+      return error(res, 403, 'Open the local Strata app to manage Context Optimizer.');
+    }
+    if (path === '/api/agent/context-optimizer' && method === 'GET') return json(res, 200, optimizerSettings());
+    if (method !== 'POST') return error(res, 405, 'Method not allowed.');
+    const body = await readBody(req, 4096);
+    let config;
+    try { config = contextOptimizerSettings(body); }
+    catch (e) { return error(res, 400, e.message); }
+    if (path.endsWith('/test')) {
+      if (!config.baseUrl || !config.model) return error(res, 400, 'Enter a local server address and model ID to test.');
+      const start = performance.now();
+      const signal = new AbortController();
+      res.once('close', () => signal.abort());
+      const ok = await probeContextOptimizer(config, signal.signal);
+      if (res.destroyed) return;
+      return json(res, 200, { ok, durationMs: Math.round(performance.now() - start) });
+    }
+    store.update({ agentChat: { ...(store.get().agentChat ?? {}), contextOptimizer: config } });
+    return json(res, 200, config);
+  }
   if (path === '/api/agent/compaction' && method === 'GET') return json(res, 200, compactionView());
   if (path === '/api/agent/helper-limit' && method === 'GET') return json(res, 200, { helperLimitMin: helperLimitMin(store.get().agentChat?.helperLimitMin) });
   if (path === '/api/agent/helper-limit' && method === 'POST') {

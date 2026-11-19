@@ -13,6 +13,7 @@ import { FontChoice } from '../components/FontChoice';
 import { ElectricityPrice } from '../components/ElectricityPrice';
 import { ApprovalNotifySetting, DoneSoundSetting, NumberQuotesSetting, PortSetting, TraySetting, useShellState } from '../components/ShellSettings';
 import { CompactionSetting } from '../components/CompactionSetting';
+import { ContextOptimizerSetting } from '../components/ContextOptimizerSetting';
 import { HelperLimitSetting } from '../components/HelperLimitSetting';
 import { ChatDefaultsSetting } from '../components/ChatDefaultsSetting';
 import { LANGUAGES } from '../lib/i18n';
@@ -42,6 +43,7 @@ export function SettingsScreen() {
         { section: 'General', label: 'Your rules', hint: 'Rules the assistant follows in every chat, for example "Answer in German" or "Keep answers short". New answers use them right away.', aliases: 'instructions system prompt agents.md custom global always', control: <UserRulesSetting /> },
         { section: 'General', label: 'Electricity price', hint: 'Price of one kilowatt-hour. The Monitor then shows what your graphics card has cost since Strata started. Leave it empty to hide the cost.', aliases: 'cost power energy kwh currency money', control: <ElectricityPrice /> },
         { section: 'General', label: 'Summarize older messages', hint: 'How full a chat has to get before the assistant condenses its beginning to make room. Later keeps more of the conversation and leaves less room for one answer; the assistant picks the new number up on its next message.', aliases: 'compact compaction context window threshold summarize tokens history memory', control: <CompactionSetting /> },
+        { section: 'General', label: 'Context Optimizer', hint: 'Let a small local model select excerpts from older assistant messages and tool results when the coding assistant makes room. Off by default. Standard summarization takes over if the selection fails.', aliases: 'compaction context window history memory local model', control: <ContextOptimizerSetting /> },
         { section: 'General', label: 'Helper time limit', hint: 'Stops a helper that keeps working longer than this. Off lets helpers run as long as they need.', aliases: 'helper subagent agent time limit timeout stop long running minutes hours', control: <HelperLimitSetting /> },
         { section: 'General', label: 'New chats', hint: 'What every new conversation starts with: how much it may do on its own, how deeply it thinks, and how long one answer may be. A conversation you are already in keeps its own choice.', aliases: 'default mode permission bypass plan manual thinking reasoning effort budget tokens limit', control: <ChatDefaultsSetting /> },
         { section: 'Reading & focus', label: 'Font', hint: 'Choose an installed font for the interface and conversations.', control: <FontChoice /> },
