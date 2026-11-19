@@ -22,6 +22,7 @@ import { setLanguage, setWhileBusy } from '../lib/store';
 import { UserRulesSetting } from '../components/UserRules';
 import { CONTENT_FONT_RANGE, setContentFontSize, setDensity, setReplyWidth, setFocus, setMotion, setShortcuts, setTheme, setTransparency, setUiScale, UI_SCALES, useStore, setSettingsSection } from '../lib/store';
 const PANELS = [{ name: 'Appearance', icon: 'sun', sections: ['General', 'Reading & focus'] }, { name: 'Models', icon: 'models', sections: [] }, { name: 'Context and memory', icon: 'memory', sections: ['Chat context', 'System RAM'] }, { name: 'Tools', icon: 'tool', sections: [] }, { name: 'Storage', icon: 'disk', sections: ['Storage'] }, { name: 'Engine', icon: 'engine', sections: [] }, { name: 'About', icon: 'info', sections: ['About', 'Update', 'Privacy'] }] as const;
+const panelId = (name: typeof PANELS[number]['name']) => name.replaceAll(' ', '-');
 export function SettingsScreen() {
     const prefs = useStore(s => s);
     const [shell, saveShell] = useShellState();
@@ -71,12 +72,12 @@ export function SettingsScreen() {
             const index = PANELS.findIndex(p => p.name === active);
             const next = e.key === 'Home' ? 0 : e.key === 'End' ? PANELS.length - 1 : (index + (['ArrowDown', 'ArrowRight'].includes(e.key) ? 1 : -1) + PANELS.length) % PANELS.length;
             activate(PANELS[next].name);
-            document.getElementById(`settings-tab-${PANELS[next].name}`)?.focus();
+            document.getElementById(`settings-tab-${panelId(PANELS[next].name)}`)?.focus();
         }}>
-      {tr(PANELS.map(panel => <button key={panel.name} role="tab" id={`settings-tab-${panel.name}`} aria-controls={`settings-panel-${panel.name}`} aria-selected={active === panel.name} tabIndex={active === panel.name ? 0 : -1} className="settingsindex__item" onClick={() => activate(panel.name)}><Icon name={panel.icon as IconName} size={17}/>{tr(panel.name)}</button>))}
+      {tr(PANELS.map(panel => <button key={panel.name} role="tab" id={`settings-tab-${panelId(panel.name)}`} aria-controls={`settings-panel-${panelId(panel.name)}`} aria-selected={active === panel.name} tabIndex={active === panel.name ? 0 : -1} className="settingsindex__item" onClick={() => activate(panel.name)}><Icon name={panel.icon as IconName} size={17}/>{tr(panel.name)}</button>))}
     </nav>
     <div className="settings-pane" ref={scrollRef}>
-      {tr(PANELS.map(panel => <div key={panel.name} role="tabpanel" tabIndex={0} id={`settings-panel-${panel.name}`} aria-labelledby={`settings-tab-${panel.name}`} hidden={active !== panel.name}>
+      {tr(PANELS.map(panel => <div key={panel.name} role="tabpanel" tabIndex={0} id={`settings-panel-${panelId(panel.name)}`} aria-labelledby={`settings-tab-${panelId(panel.name)}`} hidden={active !== panel.name}>
         {tr(panel.name === 'Models' ? <SettingsModels /> : panel.name === 'Tools' ? (active === panel.name ? <SettingsTools /> : null) : panel.name === 'Engine' && active === panel.name ? <div className="stack stack--lg settings-body"><section className="settings-section"><h2 className="h3" style={{ marginBottom: 14 }}>{tr("Engine")}</h2><NativeOperations /></section></div> : active === panel.name ? <div className="stack stack--lg settings-body">
           {tr(panel.sections.map(section => <section className="settings-section" key={section}>
             <h2 className="h3" style={{ marginBottom: 14 }}>{tr(section)}</h2>
