@@ -1,3 +1,5 @@
+import type { ChatMessage } from './types';
+
 /** What Enter does when the person sends a message while the assistant is still answering (#4783). The web chat page has the same three. */
 export type WhileBusy = 'wait' | 'queue' | 'interject';
 export const WHILE_BUSY: readonly WhileBusy[] = ['wait', 'queue', 'interject'];
@@ -20,4 +22,27 @@ export function busyPlan(mode: WhileBusy): BusyPlan {
  */
 export function parkedReady(viewed: string | null | undefined, active: string | null | undefined, streaming: boolean, parked: number): boolean {
   return !!viewed && viewed === active && !streaming && parked > 0;
+}
+
+export function isLiveFollowUp(message: Pick<ChatMessage, 'id' | 'role'>): boolean {
+  return message.role === 'user' && message.id.startsWith('steer-');
+}
+
+/** The store puts live follow-ups before the reply so the streaming and
+ * reattach paths can keep writing to that reply. Draw them after the reply's
+ * work in the transcript, where the person is following the current run. */
+export function visibleChatMessages<T extends Pick<ChatMessage, 'id' | 'role' | 'at'>>(messages: readonly T[]): readonly T[] {
+  let ordered: T[] | undefined;
+  for (let i = 0; i < messages.length; i++) {
+    if (!isLiveFollowUp(messages[i])) continue;
+    const start = i;
+    while (i + 1 < messages.length && isLiveFollowUp(messages[i + 1])) i++;
+    const reply = messages[i + 1];
+    if (reply?.role !== 'assistant' || !(Date.parse(reply.at) <= Date.parse(messages[start].at))) continue;
+    ordered ??= messages.slice();
+    // Keep the receipt order if several messages arrive during one reply.
+    ordered.splice(start, i - start + 2, reply, ...messages.slice(start, i + 1));
+    i++;
+  }
+  return ordered ?? messages;
 }
