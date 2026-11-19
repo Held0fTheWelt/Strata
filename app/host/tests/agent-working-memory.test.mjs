@@ -76,13 +76,15 @@ test('the unchanged default profile mounts the plugin only when explicitly enabl
   const baseline = buildProfile({});
   assert.deepEqual(baseline, buildProfile({ workingMemory: false }));
   assert.doesNotMatch(baseline.patch, /strata-working-memory/);
+  assert.doesNotMatch(baseline.patch, /strata-edit-recovery/);
   assert.match(buildProfile({ workingMemory: true }).patch, /strata-working-memory/);
+  assert.match(buildProfile({ workingMemory: true }).patch, /strata-edit-recovery/);
 });
 
 
 const hasHarness = process.env.STRATA_HARNESS_DIR && resolveHarness({ env: process.env }).ok;
 
-test('the packaged Harness recalls work across a restart and requires a new file observation', { skip: !hasHarness, timeout: 240_000 }, async t => {
+test('the packaged Harness recalls work across restarts and requires a fresh Read after a stale edit', { skip: !hasHarness, timeout: 360_000 }, async t => {
   const dir = mkdtempSync(join(tmpdir(), 'strata-working-memory-'));
   const workspace = join(dir, 'workspace');
   const target = join(workspace, 'target.txt');
@@ -128,4 +130,19 @@ test('the packaged Harness recalls work across a restart and requires a new file
   assert((await run('SCRIPT:read target.txt')).some(tool => tool.name === 'read' && tool.state === 'done'));
   assert((await run(edit)).some(tool => tool.name === 'edit' && tool.state === 'done'));
   assert.equal(readFileSync(target, 'utf8'), 'owner=externally-changed\nstatus=done\n');
+
+  const stale = 'SCRIPT:call edit {"file_path":"target.txt","old_string":"status=waiting","new_string":"status=approved"}';
+  const recovered = 'SCRIPT:call edit {"file_path":"target.txt","old_string":"status=done","new_string":"status=approved"}';
+  const beforeMiss = worker.requests.length;
+  assert((await run(stale)).some(tool => tool.name === 'edit' && tool.state === 'error'));
+  assert(worker.requests.slice(beforeMiss).some(request => request.raw.includes('old_string was not found') && request.raw.includes('Use Read on this file now')));
+  await bridge.close();
+  bridge = newBridge();
+  const beforeRetry = worker.requests.length;
+  assert((await run(recovered)).some(tool => tool.name === 'edit' && !['done', 'running'].includes(tool.state)));
+  assert(worker.requests.slice(beforeRetry).some(request => request.raw.includes('A previous edit could not find its original text')));
+  assert.equal(readFileSync(target, 'utf8'), 'owner=externally-changed\nstatus=done\n');
+  assert((await run('SCRIPT:read target.txt')).some(tool => tool.name === 'read' && tool.state === 'done'));
+  assert((await run(recovered)).some(tool => tool.name === 'edit' && tool.state === 'done'));
+  assert.equal(readFileSync(target, 'utf8'), 'owner=externally-changed\nstatus=approved\n');
 });
