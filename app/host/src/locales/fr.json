@@ -3595,6 +3595,7 @@
   "s9155": "Le message a été envoyé, mais son historique n’a pas pu être enregistré.",
   "s9156": "Aucun assistant n’a pu être mis à jour. Les assistants en cours doivent d’abord terminer ou être arrêtés.",
   "s9157": "Restaurez cet assistant avant de lui envoyer un message.",
+  "updatePauseButton": "Suspendre pour la mise à jour",
   "updatePause0": "Enregistrer le travail et suspendre tous les agents pour la mise à jour",
   "updatePause1": "Enregistrement du travail et préparation de la mise à jour…",
   "updatePause2": "Travail enregistré. La mise à jour peut commencer.",
