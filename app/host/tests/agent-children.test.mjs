@@ -156,6 +156,32 @@ test('update preparation checkpoints two active helpers, confirms exit and fence
   await assert.rejects(r.run('new-chat', 'resume'), { code: 'update-paused' });
 });
 
+test('after an update the parent discovers and resumes its paused helper on the same session', { skip, timeout: 60_000 }, async t => {
+  const r = await rig(t);
+  const chatId = 'resume-after-update';
+  let helperId, paused;
+  await r.run(chatId, 'SCRIPT:spawn 1 slow 120', { onFrame(frame) {
+    if (paused || frame.type !== 'agent' || frame.agent.status !== 'working') return;
+    helperId = frame.agent.id;
+    paused = r.bridge.prepareForUpdate();
+    paused.catch(() => {});
+  } });
+  assert.ok((await paused).receipts.some(row => row.helperId === helperId && row.confirmed));
+  const parentId = r.bridge.sessionOf(chatId);
+  const restarted = createAgentBridge({ dataDir: r.dir, connections: () => [],
+    localInstances: () => [{ id: 'inst-1', label: 'Scripted', baseUrl: r.worker.url, modelId: 'scripted-model', context: 32768, slots: 4 }] });
+  t.after(() => restarted.close());
+  const frames = [];
+  const resume = message => restarted.runTurn({ chatId, message, workspacePath: r.ws, mode: 'bypass', onFrame: f => frames.push(f) });
+  await resume('SCRIPT:call list_agents {}');
+  assert.equal(restarted.sessionOf(chatId), parentId);
+  assert.ok(r.worker.requests.some(req => JSON.parse(req.raw).messages.some(m => m.role === 'tool' && JSON.stringify(m.content).includes(helperId + ' [inactive]'))));
+  await resume('SCRIPT:call send_message ' + JSON.stringify({ agent_id: helperId, message: 'SCRIPT:echo Continued existing assignment' }));
+  assert.deepEqual([...rows(frames).keys()], [helperId]);
+  assert.equal(rows(frames).get(helperId).at(-1).status, 'completed');
+  assert.ok(r.worker.requests.some(req => req.directive === 'echo' && req.raw.includes('SCRIPT:slow 120')), 'the resumed helper sees its own original task');
+});
+
 test('the packaged Harness accepts a browser message addressed to a single working helper', { skip, timeout: 40_000 }, async t => {
   const r = await rig(t);
   const chatId = 'message-one-helper';

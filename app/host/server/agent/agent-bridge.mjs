@@ -784,9 +784,18 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
 
     emit({ type: 'start', model: route.name, contextMax: route.contextWindow, demo: false, remoteModel: route.kind === 'api', agent: true, mode: appliedMode, sessionId, requestId, skills: [], ...(planTask ? { planning: true } : {}) });
 
+    // A resumed child keeps its ID. Its creation is in the parent's history,
+    // and the Harness emits no second catalog event when accepting a message.
+    const knownChildren = new Map();
     turn.follow = runtime.gw.openStream('session/follow', { request: { address: { kind: 'session', sessionId }, assistantStream: true } }, {
       onItem: item => {
         if (item.type === 'snapshot') {
+          for (const record of item.records ?? []) {
+            if (record.type === 'event' && record.event.type === 'subagent/catalog') {
+              const entry = record.event.data;
+              knownChildren.set(entry.childId, entry);
+            }
+          }
           if (turn.lastSeq < 0) turn.lastSeq = item.cursor;
           else for (const r of item.records ?? []) if (r.type === 'event' && r.event.seq > turn.lastSeq) handle({ type: 'event', event: r.event });
           // A turn the Harness started by itself may be mid-reply when this follow opens: the text so far comes from the snapshot, once.
@@ -979,14 +988,19 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           if (!turn.parentOpen) { turn.parentOpen = true; clearTimeout(turn.settleTimer); }
           break;
         case 'tool/call':
-          if (d.name === 'subagent' || d.name === 'subagent_fork') turn.subagentCalls.set(d.callId, parseArgs(d.arguments));
+          if (d.name === 'subagent' || d.name === 'subagent_fork' || d.name === 'send_message') turn.subagentCalls.set(d.callId, parseArgs(d.arguments));
           break;
         case 'subagent/catalog':
+          knownChildren.set(d.childId, d);
           openChild(d);
           break;
         case 'tool/result': {
           const call = turn.subagentCalls.get(d.message?.toolCallId);
           const text = (d.message?.content ?? []).map(p => p.text ?? '').join(' ');
+          if (call?.agent_id && !d.message?.isError) {
+            const target = knownChildren.get(call.agent_id);
+            if (target?.mode === 'continuable') openChild(target);
+          }
           const started = /started subagent ([0-9a-f-]{36})/i.exec(text);
           const child = started ? turn.children.get(started[1]) : null;
           if (call && child) { child.cp.task = String(call.prompt ?? call.description ?? '').replace(/\s+/g, ' ').trim().slice(0, 140); emitRow(child, true); }
