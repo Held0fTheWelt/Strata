@@ -116,6 +116,13 @@ The [connection registry](../terminal/strata_cli/launch/harness.py) supplies the
 Do not mistake printed configuration or an older tested version for a successful check of the current setup.
 See [connection instructions and limits](TERMINAL_LAUNCH.md#connect-your-apps-strata-connect).
 
+## Agent working memory
+
+Set `STRATA_AGENT_WORKING_MEMORY=1` in the Strata host environment to try working memory. Restart the host to pick up the setting.
+On the next user message in an existing agent chat, the Harness can add a short brief from that session's saved events and active jobs.
+It includes earlier requests, open checklist items, and recent tool outcomes with their source and time. On a resumed edit,
+the agent reads the current file and constructs the edit from that read. The Harness checks the file version before writing.
+
 ## Evidence and publishing
 
 - Cite the release, commit and relevant guide behind each compatibility claim.

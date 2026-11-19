@@ -58,6 +58,7 @@ export const GATE_PLUGIN = fileURLToPath(new URL('./plugins/strata-gate.mjs', im
 /** The app's web search (DuckDuckGo, or the person's own Exa / Perplexity key), registered with the Harness's web seam. */
 /** Compaction that measures the real prompt and summarises in pieces that fit the window (plugins/strata-context.mjs). */
 export const CONTEXT_PLUGIN = fileURLToPath(new URL('./plugins/strata-context.mjs', import.meta.url));
+const WORKING_MEMORY_PLUGIN = fileURLToPath(new URL('./plugins/strata-working-memory.mjs', import.meta.url));
 export const MODELS_PLUGIN = fileURLToPath(new URL('./plugins/strata-models.mjs', import.meta.url));
 const QUESTIONS_PLUGIN = fileURLToPath(new URL('./plugins/strata-questions.mjs', import.meta.url));
 export const SEARCH_PLUGIN = fileURLToPath(new URL('./plugins/strata-search.mjs', import.meta.url));
@@ -300,7 +301,7 @@ const THINKING_COMPAT = { supportsStore: false, thinkingFormat: 'chat-template',
 // the same request hides the missing answer and can take six model calls to report it.
 const AGENT_RETRY_POLICY = { mode: 'normal', retryableCodes: ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'], backoff: {} };
 
-export function buildProfile({ local = [], connections = [], gate = true, tools = NO_TOOLS_SETTINGS, skillsDir = null, proxyBase = null, searchMock = null, defaultLocalId = null }) {
+export function buildProfile({ local = [], connections = [], gate = true, tools = NO_TOOLS_SETTINGS, skillsDir = null, proxyBase = null, searchMock = null, defaultLocalId = null, workingMemory = false }) {
   const providers = {};
   const env = {};
   const routes = [];
@@ -444,6 +445,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
     ...(gate ? [{ insert: [{ id: 'strata-gate', name: GATE_PLUGIN, config: { web: { provider: SEARCH_NAMES[keyed ?? 'builtin'], skipAsk: tools.webWithoutAsking === true }, blocked: tools.blockedFolders ?? [] } }] }] : []),
     // Compaction decides from what the model server measured, and its summary requests always fit the window (plugins/strata-context.mjs).
     { insert: [{ id: 'strata-context', name: CONTEXT_PLUGIN, config: {} }] },
+    ...(workingMemory ? [{ insert: [{ id: 'strata-working-memory', name: WORKING_MEMORY_PLUGIN, config: {} }] }] : []),
     ...(!tools.off.has('questions') ? [{ insert: [{ id: 'strata-questions', name: QUESTIONS_PLUGIN, config: {} }] }] : []),
     // Helper agents on a model the person names: every model the app can reach is allowed, and the plugin makes the choice forgiving (plugins/strata-models.mjs).
     ...(subagentRoutes.length ? [{ id: 'subagent-model-selection-settings', config: { enabled: true, allowedModels: subagentRoutes.map(r => ({ provider: r.provider, model: r.model })) } }] : []),

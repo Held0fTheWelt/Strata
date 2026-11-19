@@ -239,7 +239,10 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   let shapeTargets = {};
   function buildProfileNow() {
     const toolSettings = tools();
-    const profile = buildProfile({ local: localInstances(), connections: connections(), gate, tools: toolSettings, skillsDir: skillsDir(), proxyBase, searchMock, defaultLocalId: defaultLocalId() });
+    const profile = buildProfile({
+      local: localInstances(), connections: connections(), gate, tools: toolSettings, skillsDir: skillsDir(),
+      proxyBase, searchMock, defaultLocalId: defaultLocalId(), workingMemory: env.STRATA_AGENT_WORKING_MEMORY === '1',
+    });
     shapeTargets = profile.shapeTargets ?? {};
     // FIX-APP A5: which Settings -> Tools values this profile was made from (compared, never shown or logged), so a restart that waits for other chats can say whether the Tools
     // settings or the model list is why (the tools signature moves with a model change too).
