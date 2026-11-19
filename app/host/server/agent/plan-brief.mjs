@@ -8,19 +8,46 @@ const fileKey = (cwd, path) => {
   const full = resolve(cwd, path);
   return process.platform === 'win32' ? full.toLowerCase() : full;
 };
+const relativePath = value => {
+  const path = value.trim().replaceAll('\\', '/');
+  return path.length <= 120 && path.split('/').every(part => /^[\p{L}\p{N}_. -]+$/u.test(part) && part !== '.' && part !== '..') ? path : null;
+};
+
+// Only an explicit file switch changes the check. Status requests and extra
+// reading instructions can arrive during the same step without changing it.
+const fileReference = String.raw`(?:\x60([^\x60\r\n]+)\x60|"([^"\r\n]+)"|([^\s\x60",;!?]+))`;
+const directionStart = String.raw`(?:^|[.!?]\s+|\n)\s*(?:please\s+|bitte\s+)?`;
+const replacement = new RegExp(String.raw`${directionStart}(?:use|read|take|nimm|nutze|verwende|lies)\s+${fileReference}\s+(?:instead of|statt|anstelle von)\s+${fileReference}`, 'iu');
+const switchTo = new RegExp(String.raw`${directionStart}(?:switch to|wechsle zu)\s+${fileReference}`, 'iu');
+const reference = (match, index) => relativePath(match[index] ?? match[index + 1] ?? match[index + 2]?.replace(/\.$/u, '') ?? '');
+
+function changedTarget(text, cwd, current) {
+  if (!current?.path || !cwd) return null;
+  const pair = replacement.exec(text);
+  const from = pair && reference(pair, 4);
+  const next = pair && from && fileKey(cwd, from) === fileKey(cwd, current.path) ? pair : switchTo.exec(text);
+  if (!next) return null;
+  const path = reference(next, 1);
+  if (!path || !/\.[\p{L}\p{N}]+$/u.test(path) || fileKey(cwd, path) === fileKey(cwd, current.path)) return null;
+  return { path };
+}
 
 /** Opt-in steps may declare a literal line to verify through the Harness read tool. */
 export function readRequirement(text) {
   if (!marker.test(text)) return null;
   const match = suffix.exec(text);
   if (!match || marker.test(text.slice(0, match.index))) return { invalid: true };
-  const path = match[1].trim().replaceAll('\\', '/');
+  const path = relativePath(match[1]);
   const line = match[2];
-  const parts = path.split('/');
-  if (path.length > 120 || line.length > 120 || !parts.every(part => /^[\p{L}\p{N}_. -]+$/u.test(part) && part !== '.' && part !== '..')) {
-    return { invalid: true };
-  }
+  if (!path || line.length > 120) return { invalid: true };
   return { path, line };
+}
+
+function readInstruction(requirement) {
+  const target = JSON.stringify(requirement.path);
+  return typeof requirement.line === 'string'
+    ? 'Use read on ' + target + ' and verify this exact line: ' + JSON.stringify(requirement.line) + '.'
+    : 'Use read on ' + target + ' to verify its current contents.';
 }
 
 /** Preserve the verification suffix before the plan editor clips its prose. */
@@ -50,8 +77,9 @@ export function stepBrief(plan, index) {
     index > 0 ? done.length + ' earlier steps completed. Keep their results.' : '',
     latest?.summary ? 'Latest completed result: ' + clip(latest.summary, 96) : '',
     plan.briefing ? 'Workspace instructions: ' + clip(plan.briefing, 600) : '',
+    step.verificationDirection && step.verificationDirection !== step.correction ? 'User direction that changed the check: ' + clip(step.verificationDirection, 600) : '',
     step.correction ? 'Latest user direction for this step: ' + clip(step.correction, 600) : '',
-    requirement?.path ? 'Before marking this step complete, use read on ' + JSON.stringify(requirement.path) + ' and verify this exact line: ' + JSON.stringify(requirement.line) + '.' : '',
+    requirement?.path ? 'Before marking this step complete: ' + readInstruction(requirement) : '',
     'Work on the current step. Apply the latest live user direction if it changes the step. Verify the result before finishing the goal.',
   ].filter(Boolean);
 }
@@ -68,11 +96,12 @@ export class StepEvidence {
   }
 
   correct(text) {
-    const requirement = readRequirement(text);
-    if (!requirement) return;
+    const requirement = readRequirement(text) ?? changedTarget(text, this.cwd, this.requirement);
+    if (!requirement) return false;
     this.requirement = requirement;
     this.receipt = null;
     this.read = null;
+    return true;
   }
 
   observe(event) {
@@ -105,7 +134,9 @@ export class StepEvidence {
     this.read = null;
     if (data.message.isError !== false || seq <= read.seq || typeof data.meta?.path !== 'string'
       || fileKey(this.cwd, data.meta.path) !== target || !Array.isArray(data.meta.lines)) return;
-    const line = data.meta.lines.find(entry => entry?.text === this.requirement.line && Number.isSafeInteger(entry.number) && entry.number > 0);
-    if (line) this.receipt = { path: this.requirement.path, line: line.number, callId, seq, at: time };
+    const expected = this.requirement.line;
+    const line = data.meta.lines.find(entry => typeof entry?.text === 'string' && (expected === undefined || entry.text === expected)
+      && Number.isSafeInteger(entry.number) && entry.number > 0);
+    if (line) this.receipt = { path: this.requirement.path, ...(expected === undefined ? {} : { line: line.number }), callId, seq, at: time };
   }
 }
