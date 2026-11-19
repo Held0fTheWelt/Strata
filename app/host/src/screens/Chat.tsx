@@ -37,7 +37,7 @@ import { useLiveStatus } from '../lib/live-status';
 import { ApprovalDock, SCOPE } from '../components/ApprovalCard';
 import { artifactFromUrl, type PreviewArtifact } from '../lib/artifacts';
 import { openExternal } from '../lib/open-external';
-import { busyPlan, parkedReady } from '../lib/while-busy';
+import { busyPlan, isLiveFollowUp, parkedReady, visibleChatMessages } from '../lib/while-busy';
 import { composeNumbered, composeQuoted, parseQuoted, rememberQuoteSources, type Quote, type QuoteSource } from '../lib/quotes';
 /** Chat — talk to the one loaded model. */
 import { memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -75,6 +75,7 @@ export function ChatScreen() {
        reply streams into it. Without this, switching away from a session that
        answered you would mark it unread. */
     const messageCount = session?.messages.length ?? 0;
+    const displayedMessages = useMemo(() => visibleChatMessages(session?.messages ?? []), [session?.messages]);
     useEffect(() => {
         if (session && session.id === activeId && !streaming)
             markRead(session.id);
@@ -350,7 +351,7 @@ export function ChatScreen() {
         // The reader's own scrolling decides (#4014): a wheel notch is about 100 px and used to land inside a 120 px band that pulled
         // the view back on every token. `pinned` is set by the scroller's wheel, touch, key and scroll handlers below.
         const count = session?.messages.length ?? 0;
-        const sent = count > seenMessages.current && session?.messages.at(-1)?.role === 'user';
+        const sent = count > seenMessages.current && displayedMessages.at(-1)?.role === 'user';
         seenMessages.current = count;
         // Sending a message always brings the reader to it, as it did before; only the answer's growth waits for the reader.
         if (pinned.current && !sent && readerHasSelection(el)) {
@@ -359,7 +360,7 @@ export function ChatScreen() {
         }
         if (pinned.current || sent)
             scrollToLatest();
-    }, [session?.messages.length, session?.messages.at(-1)?.content, scrollToLatest]);
+    }, [session?.messages.length, session?.messages.at(-1)?.content, displayedMessages.at(-1)?.id, scrollToLatest]);
     // Scroll position is remembered per conversation, so returning to one puts you
     // back where you were reading rather than at the top or the bottom.
     useEffect(() => {
@@ -548,7 +549,7 @@ export function ChatScreen() {
 
             <div className="chat__inner">
               {tr(session.messages.length === 0 ? (session.statsAvailable === false ? <p className="small muted">{tr("Editing from an earlier message. Update the prompt below.")}</p> :
-            <UsageDashboard loaded={!!loaded}/>) : (session.messages.map((m, i) => (<Message key={m.id} message={m} isLast={i === session.messages.length - 1} onEditPrompt={messageHandlers.onEditPrompt} onPreview={messageHandlers.onPreview} onClosePreview={messageHandlers.onClosePreview} onOpenTimeSkip={messageHandlers.onOpenTimeSkip} timeSkipDone={!!allTimeSkipRuns.find(r => r.id === m.timeSkipId)?.completedAt} timeSkipReal={!!allTimeSkipRuns.find(r => r.id === m.timeSkipId)?.job} timeSkipRun={allTimeSkipRuns.find(r => r.id === m.timeSkipId)} onOpenLink={messageHandlers.onOpenLink}/>))))}
+            <UsageDashboard loaded={!!loaded}/>) : (displayedMessages.map(m => (<Message key={m.id} message={m} isLast={m.id === session.messages.at(-1)?.id} onEditPrompt={messageHandlers.onEditPrompt} onPreview={messageHandlers.onPreview} onClosePreview={messageHandlers.onClosePreview} onOpenTimeSkip={messageHandlers.onOpenTimeSkip} timeSkipDone={!!allTimeSkipRuns.find(r => r.id === m.timeSkipId)?.completedAt} timeSkipReal={!!allTimeSkipRuns.find(r => r.id === m.timeSkipId)?.job} timeSkipRun={allTimeSkipRuns.find(r => r.id === m.timeSkipId)} onOpenLink={messageHandlers.onOpenLink}/>))))}
               <QueuedMessages chatId={session.id}/>
             </div>
           </div>
@@ -776,10 +777,11 @@ function MessageView({ message: m, isLast, onEditPrompt, onPreview, onClosePrevi
     // #5993: which of this message's numbered quotes still have their source message in the chat ('1' / '0' each; '' when it has none), so a deleted source shows its label without the jump
     const quoteSourcesHere = useStore(s => m.quotes?.length ? m.quotes.map(q => s.sessions.find(x => x.id === activeSession)?.messages.some(y => y.id === q.messageId) ? '1' : '0').join('') : '');
     if (m.role === 'user') {
-        return (<div className="st-msg st-msg--user" data-message-id={m.id} onMouseEnter={() => setSentTime(relTime(m.at))} onFocus={() => setSentTime(relTime(m.at))}>
+        const followUp = isLiveFollowUp(m);
+        return (<div className={cx('st-msg st-msg--user', followUp && 'st-msg--follow-up')} data-message-id={m.id} onMouseEnter={() => setSentTime(relTime(m.at))} onFocus={() => setSentTime(relTime(m.at))}>
         <div className="st-bubble">{tr(m.photos?.length ? <ChatPhotos photos={m.photos}/> : null)}{sentQuote ? <><SentQuotes quotes={sentQuote.quotes} numbered={sentQuote.numbered} sources={m.quotes} exists={id => { const i = m.quotes?.findIndex(q => q.messageId === id) ?? -1; return i >= 0 && quoteSourcesHere[i] === '1'; }}/><span className="st-bubble__text">{sentQuote.reply}</span></> : m.markdown ? <Markdown text={m.content} onOpenLink={onOpenLink} imageSession={activeSession}/> : <span className="st-bubble__text">{m.content}</span>}</div>
         <div className="st-msg__meta">
-          <time dateTime={m.at} title={tr(new Date(m.at).toLocaleString(localeTag()))}>{tr(sentTime)}</time>
+          <time dateTime={m.at} title={tr(new Date(m.at).toLocaleString(localeTag()))}>{followUp ? new Date(m.at).toLocaleTimeString(localeTag(), { timeStyle: 'medium' }) : tr(sentTime)}</time>
           <span className="st-msg__actions">
             <CopyBtn text={m.content} label="Message" title="Copy message"/>
             <IconBtn name="refresh" title={tr("Rewind to here")} disabled={streaming} onClick={() => {
