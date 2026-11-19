@@ -15,7 +15,8 @@ import { recordOf, updateHelperRecords, useHelperRecords } from '../lib/helper-r
 import { plainFailureText } from '../lib/plain-errors';
 import type { Session, SessionAgent } from '../lib/types';
 import type { PreviewArtifact } from '../lib/artifacts';
-export function ChatToolbar({ session, items, selected, onSelect, onClose, onCloseTab, inline, expanded, onExpand, extraTabs = [], previewWidth }: {
+export function ChatToolbar({ onPauseForUpdate, session, items, selected, onSelect, onClose, onCloseTab, inline, expanded, onExpand, extraTabs = [], previewWidth }: {
+    onPauseForUpdate: () => Promise<void>;
     previewWidth?: number;
     extraTabs?: ExtraPreviewTab[];
     session: Session | null;
@@ -30,6 +31,7 @@ export function ChatToolbar({ session, items, selected, onSelect, onClose, onClo
 }) {
     const remote = useStore(s => s.remoteModel);
     const [agents, setAgents] = useState(false), [menu, setMenu] = useState(false), [settings, setSettings] = useState(false);
+    const [pausing, setPausing] = useState(false);
     const [showArchived, setShowArchived] = useState(false);
     const [archiving, setArchiving] = useState(false);
     const [archiveProblem, setArchiveProblem] = useState('');
@@ -63,7 +65,12 @@ export function ChatToolbar({ session, items, selected, onSelect, onClose, onClo
     const previews = !!selected && inline;
     const title = session ? sessionTitle(session) : tr('New chat');
     return <header className="chat-toolbar" style={previews && !expanded && previewWidth ? { gridTemplateColumns: `minmax(0,1fr) ${previewWidth}px` } : undefined} data-timeskip={selected?.startsWith('time-skip:') || undefined} data-preview={previews || undefined} data-expanded={expanded && previews || undefined}>
-    <div className="chat-toolbar__conversation"><h1 title={title}>{title}</h1><ChatModelPicker /><button ref={agentsRef} className="chat-agents" title={tr(count ? `${count} subagents running · View overview` : 'View subagent overview')} aria-label={tr(count ? `${count} subagents running — show overview` : 'Subagents — show overview')} aria-haspopup="dialog" aria-expanded={agents} data-working={count > 0 || undefined} onClick={() => setAgents(v => !v)}><Icon name="experts" size={17}/>{tr(count > 0 ? <span className="agent-live-dot"/> : null)}<span className="chat-agents__label">{tr("Subagents")}</span>{visible.length > 0 && <span className="chat-agents__count">{count || visible.length}</span>}<Icon name="chevron" className={agents ? 'is-open' : ''} size={13}/></button><span className="spacer"/><button ref={menuRef} className="st-btn st-btn--icon" title={tr("Chat options")} aria-label={tr("Chat options")} aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(v => !v)}><Icon name="ellipsis"/></button>{tr(!selected && (items.length || extraTabs.length) ? <IconBtn name="panel" title={tr("Open previews")} onClick={() => onSelect(extraTabs.at(-1)?.id ?? items[0].id)}/> : null)}</div>
+    <div className="chat-toolbar__conversation"><h1 title={title}>{title}</h1><ChatModelPicker /><button ref={agentsRef} className="chat-agents" title={tr(count ? `${count} subagents running · View overview` : 'View subagent overview')} aria-label={tr(count ? `${count} subagents running — show overview` : 'Subagents — show overview')} aria-haspopup="dialog" aria-expanded={agents} data-working={count > 0 || undefined} onClick={() => setAgents(v => !v)}><Icon name="experts" size={17}/>{tr(count > 0 ? <span className="agent-live-dot"/> : null)}<span className="chat-agents__label">{tr("Subagents")}</span>{visible.length > 0 && <span className="chat-agents__count">{count || visible.length}</span>}<Icon name="chevron" className={agents ? 'is-open' : ''} size={13}/></button><span className="spacer"/>
+      <Btn size="sm" icon="stop" disabled={pausing} title={tr('Save progress and pause all agents for an update')} onClick={async () => {
+        setPausing(true);
+        try { await onPauseForUpdate(); } finally { setPausing(false); }
+      }}>{tr('Pause for update')}</Btn>
+      <button ref={menuRef} className="st-btn st-btn--icon" title={tr("Chat options")} aria-label={tr("Chat options")} aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(v => !v)}><Icon name="ellipsis"/></button>{tr(!selected && (items.length || extraTabs.length) ? <IconBtn name="panel" title={tr("Open previews")} onClick={() => onSelect(extraTabs.at(-1)?.id ?? items[0].id)}/> : null)}</div>
     {tr(previews ? <div className="chat-toolbar__previews"><ArtifactTabs extraTabs={extraTabs} onCloseTab={onCloseTab} items={items} selected={selected} onSelect={onSelect}/><div className="preview-window-actions"><div id="preview-file-actions" className="preview-file-actions"/><IconBtn name={expanded ? 'contract' : 'expand'} title={tr(expanded ? 'Exit full screen preview' : 'Full screen preview')} onClick={onExpand}/><IconBtn name="panel" title={tr("Collapse preview sidebar")} onClick={onClose}/></div></div> : null)}
     {agents && <Popover anchor={agentsRef.current} title={visible.length || archived.length ? "Subagents" : "No subagents recorded"}
       detail={visible.length ? <>{count}{tr(" running · ")}{visible.filter(a => a.status === 'completed').length}{tr(" completed · ")}{visible.length}{tr(" total")}</> : undefined}

@@ -775,6 +775,22 @@ INFO after:  ${JSON.stringify(sel1.slice(0, 40))} ... ${JSON.stringify(sel1.slic
   await page2.context().close();
 };
 
+cases['pause-for-update'] = async () => {
+  const page = await open('light', 900, 720, [chat('pause-chat', 'Update', [])], { prefs: { language: 'de' }, locale: 'de-DE' });
+  const button = page.getByRole('button', { name: 'Für Update pausieren', exact: true });
+  await button.waitFor({ state: 'visible' });
+  await shot(page, 'pause-for-update');
+  await page.setViewportSize({ width: 390, height: 800 });
+  const bounds = await button.boundingBox();
+  check(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390, 'the pause button fits a narrow chat window');
+  const response = page.waitForResponse(r => r.url().endsWith('/api/chat/pause-for-update') && r.request().method() === 'POST');
+  await button.click();
+  const result = await response;
+  check(result.ok() && existsSync((await result.json()).checkpoint), 'the visible German chat button saves a checkpoint');
+  await page.getByText('Arbeitsstand gesichert. Bereit für das Update.', { exact: true }).waitFor();
+  await page.context().close();
+};
+
 /* ------------------------------------------------------------------------------------------------------------------ run */
 let ran = 0;
 for (const [name, fn] of Object.entries(cases)) {

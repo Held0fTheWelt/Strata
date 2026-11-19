@@ -3596,6 +3596,7 @@
   "s9155": "Die Nachricht wurde gesendet, ihr Verlauf konnte aber nicht gespeichert werden.",
   "s9156": "Es konnten keine Helfer aktualisiert werden. Laufende Helfer müssen zuerst fertig werden oder gestoppt werden.",
   "s9157": "Stellen Sie diesen Helfer wieder her, bevor Sie ihm eine Nachricht senden.",
+  "updatePauseButton": "Für Update pausieren",
   "updatePause0": "Arbeitsstand sichern und alle Agenten für ein Update pausieren",
   "updatePause1": "Arbeitsstand wird gesichert und das Update vorbereitet…",
   "updatePause2": "Arbeitsstand gesichert. Bereit für das Update.",
