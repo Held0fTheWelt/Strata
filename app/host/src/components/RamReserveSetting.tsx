@@ -42,7 +42,7 @@ export function RamReserveSetting() {
 
     return <div className="stack stack--sm">
         {saved !== undefined && <form className="stack stack--sm" onSubmit={e => { e.preventDefault(); void save(); }}>
-            <Select ariaLabel={tr("RAM to keep free (GiB)")} value={choice} options={[
+            <Select ariaLabel={tr("RAM to keep free (GiB) (experimental)")} value={choice} options={[
                     { value: 'auto', label: tr("Automatic") },
                     ...presets.map(n => ({ value: String(n), label: String(n) + ' GiB' })),
                     { value: 'custom', label: tr("Custom") },
