@@ -6,6 +6,28 @@ const STEPS_WITHOUT_PROGRESS = 12;
 const WAIT_TOOLS = new Set(['job_wait', 'wait_for_job', 'wait_for_subagent']);
 const THINKING_WINDOW = 4096;
 const THINKING_CHECK_EVERY = 768;
+const TEST_REPORTERS = [
+  {
+    command: /^node(?:\.exe)?[ \t]+--test(?:[ \t]|$)/i,
+    timing: [
+      /^([ \t]*[✔✖﹣] .*) \(\d+(?:\.\d+)?ms\)(?=[ \t]*$)/gmu,
+      /^([ \t]*(?:(?:#|ℹ) duration_ms|duration_ms:)[ \t]+)\d+(?:\.\d+)?(?=[ \t]*$)/gmu,
+    ],
+  },
+  {
+    command: /^(?:pytest(?:\.exe)?|python(?:\.exe)?[ \t]+-m[ \t]+pytest)(?:[ \t]|$)/i,
+    timing: [
+      /^([ \t]*(?:=+[ \t]+)?\d+ (?:passed|failed|skipped|xfailed|xpassed|errors?|warnings?|deselected)(?:, \d+ (?:passed|failed|skipped|xfailed|xpassed|errors?|warnings?|deselected))* in )\d+(?:\.\d+)?s(?=[ \t=]*$)/gmu,
+    ],
+  },
+  {
+    command: /^ctest(?:\.exe)?(?:[ \t]|$)/i,
+    timing: [
+      /^([ \t]*\d+\/\d+[ \t]+Test[ \t]+#\d+:.*(?:Passed|Failed|Timeout|Not Run)[ \t]+)\d+(?:\.\d+)? sec(?=[ \t]*$)/gmu,
+      /^([ \t]*Total Test time \(real\)[ \t]*=[ \t]*)\d+(?:\.\d+)? sec(?=[ \t]*$)/gmu,
+    ],
+  },
+];
 
 /** Catch a clearly periodic suffix in the model's reasoning, without reading tool drafts or answer text. */
 function repeatsPassage(text) {
@@ -31,9 +53,30 @@ function argumentsOf(args) {
   try { return JSON.parse(args); } catch { return args; }
 }
 
-function fingerprint(call, message) {
+/** Ignore the reporter's timing fields for a standalone test command. Keep
+ * output from scripts, monitors and compound shell commands verbatim. */
+function testResult(call, content, fileChanges) {
+  if (!['bash', 'pwsh'].includes(call.name) || !Array.isArray(content)) return null;
+  const command = call.args?.command;
+  if (typeof command !== 'string' || /[&;|<>\r\n]/u.test(command)) return null;
+  const reporter = TEST_REPORTERS.find(r => r.command.test(command.trim()));
+  if (!reporter) return null;
+  let changed = false;
+  const result = content.map(block => {
+    if (block?.type !== 'text' || typeof block.text !== 'string') return block;
+    const text = reporter.timing.reduce((value, pattern) => value.replace(pattern, '$1<time>'), block.text);
+    if (text === block.text) return block;
+    changed = true;
+    return { ...block, text };
+  });
+  if (!changed) return null;
+  const { description, ...args } = call.args;
+  return [{ ...call, args }, result, fileChanges];
+}
+
+function fingerprint(call, message, fileChanges) {
   return createHash('sha256')
-    .update(JSON.stringify(canonical([call, message.isError === true, message.content])))
+    .update(JSON.stringify(canonical([message.isError === true, testResult(call, message.content, fileChanges) ?? [call, message.content]])))
     .digest('hex');
 }
 
@@ -49,6 +92,7 @@ export class ProgressGuard {
   attempt = null;
   thinking = '';
   sinceThinkingCheck = 0;
+  fileChanges = 0;
 
   newInstruction() {
     this.recent.clear();
@@ -87,13 +131,16 @@ export class ProgressGuard {
         if (!call) break;
         this.calls.delete(message.toolCallId);
         if (WAIT_TOOLS.has(call.name)) { this.waited = true; break; }
-        const key = fingerprint(call, message);
+        const key = fingerprint(call, message, this.fileChanges);
         const prior = this.recent.get(key) ?? 0;
         this.recent.delete(key);
         this.recent.set(key, prior + 1);
         if (this.recent.size > RECENT_RESULTS) this.recent.delete(this.recent.keys().next().value);
         if (prior + 1 >= REPEATED_RESULT_LIMIT) this.repeated = true;
-        else if (prior === 0 && !message.isError) this.progress();
+        else if (prior === 0 && !message.isError) {
+          if (call.name === 'edit' || call.name === 'write') this.fileChanges++;
+          this.progress();
+        }
         break;
       }
       case 'step/end': {
