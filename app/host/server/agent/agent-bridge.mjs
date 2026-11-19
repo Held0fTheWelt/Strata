@@ -609,6 +609,8 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     function showFollowUp(entry) {
       if (entry.shown) return;
       entry.shown = true;
+      entry.message.at = new Date().toISOString();
+      progress.newInstruction();
       turn.followUps.push(entry.message);
       emit({ type: 'agent-follow-up', message: entry.message });
     }
@@ -1173,7 +1175,7 @@ ${note.text}
         showFollowUp(entry);
       } catch (error) {
         // The session event can confirm delivery even if the HTTP acknowledgement was lost.
-        if (!turn.pendingSteers.delete(id)) return { ok: true };
+        if (!turn.pendingSteers.delete(id)) return { ok: true, message: entry.message };
         throw error;
       } finally {
         turn.steerAdmissions.delete(admission);

@@ -372,6 +372,28 @@ test('#4783 the composer acts on the choice, the default keeps today\'s behaviou
   assert.match(src('screens/Settings.tsx'), /setWhileBusy\(value as typeof prefs\.whileBusy\)/);
 });
 
+test('live follow-ups appear after the reply they were sent into, without moving the stored reply', async () => {
+  const { visibleChatMessages, isLiveFollowUp } = await load('lib/while-busy.ts');
+  const row = (id, role, minute) => ({ id, role, at: new Date(Date.UTC(2026, 0, 1, 12, minute)).toISOString() });
+  const prompt = row('prompt', 'user', 0);
+  const first = row('steer-1', 'user', 2);
+  const second = row('steer-2', 'user', 3);
+  const running = { ...row('reply', 'assistant', 0), streaming: true };
+  const stored = Object.freeze([prompt, first, second, running]);
+  assert.equal(isLiveFollowUp(first), true);
+  assert.equal(isLiveFollowUp(prompt), false);
+  assert.deepEqual(visibleChatMessages(stored), [prompt, running, first, second]);
+  assert.equal(stored.at(-1), running, 'reattach can still find the active reply');
+  const next = row('next', 'assistant', 5);
+  assert.deepEqual(visibleChatMessages([...stored, next]), [prompt, running, first, second, next]);
+  const withoutReply = [prompt, first, next];
+  assert.equal(visibleChatMessages(withoutReply), withoutReply, 'a later reply stays after a follow-up already in display order');
+  assert.equal(visibleChatMessages([first]).at(-1), first, 'a receipt with no matching reply is visible');
+  const chat = src('screens/Chat.tsx');
+  assert.match(chat, /displayedMessages\.at\(-1\)\?\.role === 'user'/, 'sending catches up to the displayed bottom');
+  assert.match(chat, /m\.id === session\.messages\.at\(-1\)\?\.id/, 'the active assistant retains its status and actions');
+});
+
 test('#4783 the new sentences are translated', async () => {
   const { tr, setTranslationLanguage } = await withI18n('approvals.ts');
   const lines = ['While an answer is being written', 'What Enter does when you send a message while the assistant is still answering.', 'Wait for the answer', 'Send after the answer', 'Send a live message', 'Enter sends it when the answer is done.', 'Enter sends it at the next step, or after the answer if needed.', 'Waiting to send', 'Take back'];
