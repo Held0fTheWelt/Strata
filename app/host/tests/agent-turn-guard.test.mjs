@@ -117,6 +117,40 @@ test('changing errors do not let a run retry indefinitely', () => {
   }
 });
 
+const resultStep = (guard, name, args, text) => {
+  guard.observe({ type: 'tool/call', data: { callId: 'call', name, arguments: args } });
+  guard.observe({ type: 'tool/result', data: { message: { toolCallId: 'call', isError: false, content: [{ type: 'text', text }] } } });
+  return guard.observe({ type: 'step/end' });
+};
+
+test('repeated test reports do not make progress by changing only runner durations', () => {
+  const reports = [
+    ['node --test fixture.mjs', n => '✔ check settings (' + n + '.123ms)\nℹ pass 1\nℹ duration_ms ' + n + '.4'],
+    ['python -m pytest -q', n => '......... [100%]\n9 passed in ' + n + '.4s'],
+    ['ctest --test-dir build', n => '1/1 Test #1: Settings .... Passed    ' + n + '.1 sec\nTotal Test time (real) = ' + n + '.1 sec'],
+  ];
+  for (const [command, report] of reports) {
+    const guard = new ProgressGuard();
+    for (let run = 1; run <= 4; run++) {
+      const result = resultStep(guard, 'pwsh', { command, description: 'Run ' + run }, report(run));
+      assert.equal(result, run === 4 ? 'repeated-work' : null, command);
+    }
+  }
+});
+
+test('test outcome changes, successful edits and non-test shell output still count as progress', () => {
+  const guard = new ProgressGuard();
+  const command = 'node --test fixture.mjs';
+  for (let i = 1; i <= 5; i++) {
+    if (i > 1) assert.equal(resultStep(guard, 'edit', { file_path: 'fixture.mjs', new_string: String(i) }, 'Changed the file.'), null);
+    assert.equal(resultStep(guard, 'pwsh', { command }, '✔ check settings (1.123ms)\nℹ pass 1'), null);
+  }
+  for (let i = 1; i <= 5; i++) {
+    assert.equal(resultStep(guard, 'bash', { command }, '✖ check settings (1.123ms)\nfound ' + i + ' unexpected values'), null);
+    assert.equal(resultStep(guard, 'bash', { command: 'node --test fixture.mjs; node monitor.mjs' }, 'ℹ duration_ms ' + i), null);
+  }
+});
+
 test('the real Harness stops repeated reads, while 14 distinct reads finish and report', { skip }, async t => {
   const r = await rig(t);
   for (let i = 0; i < 14; i++) writeFileSync(join(r.ws, `fixture-${i}.txt`), `fixture ${i}\n`);
