@@ -174,6 +174,34 @@ A model sometimes writes a tool call the Strata server cannot run: a tool it was
 - **A refusal that is left** (`CONTEXT_WINDOW_EXCEEDED`) is a plain sentence with the engine's text under Details and the buttons "Summarize and continue" and "Start a new chat". "Try sending the message again" is for other errors only.
 - Tests: `tests/agent-context.test.mjs` (arithmetic; the real Harness against the scripted worker with `window`, `charsPerToken` and `noCount`), `tests/oversize.test.mjs`, `tests/context-ui.test.mjs`. The run against a real engine is `scripts/context-e2e.mjs`.
 
+### Context Optimizer
+
+Under **Settings → Appearance → General → Context Optimizer**, enter the `/v1` address of a local OpenAI-compatible chat server
+and the exact model ID it reports. Use **Test model** to check the selection format with synthetic text. Set the timeout, then
+enable and save. Strata applies the new settings when the next assistant request can safely reload the Harness.
+
+The switch starts off. The optimizer uses the desktop coding assistant's existing automatic and `/compact` paths.
+On each eligible compaction it asks a small model to rank excerpts from the old region. Strata copies validated selections in
+conversation order and preserves user and developer text from that region. The Harness writes the checkpoint and keeps the original
+events and recent conversation. The helper receives candidate text and a short user excerpt. Its input excludes the system prompt,
+tool schemas, model reasoning and attachments. It can return only a list of supplied IDs.
+
+Start the model server separately on the same computer. The host uses HTTP on `127.0.0.1` or `[::1]` without credentials or redirects.
+Both CPU and GPU model servers can implement this interface. Strata does not install, download or start a helper model.
+For example, with an existing llama.cpp installation and compatible GGUF:
+
+```sh
+llama-server --model "path/to/small-instruct.gguf" --alias context-helper --host 127.0.0.1 --port 8081 -c 8192 -ngl 0
+```
+
+Use `http://127.0.0.1:8081/v1` and `context-helper` in Settings. Use a text instruct model that reliably returns JSON.
+The helper cannot select excerpts from the recent tail because the Harness supplies only the older region for compaction.
+Strata also keeps the strongest exact term match to the last user message in that older region when it fits.
+There is one attempt per compaction, with a bounded number of batches and one overall timeout. If the endpoint fails or
+the region contains attachments, exceeds the input budget, or cannot shrink enough with user text intact, the normal
+summarizer handles the original request. The internal `/strata-context` command reports the latest attempt for that session,
+including byte counts and elapsed time or a fallback reason.
+
 ## History / older measurements
 
 - **Search refusals (2026-10):** on a real box two DuckDuckGo searches in 1.2 s answered, the third got HTTP 202, and every DuckDuckGo page refused for many minutes.

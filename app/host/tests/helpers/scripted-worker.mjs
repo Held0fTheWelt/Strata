@@ -15,6 +15,7 @@
  *                                   wider access, so the approval gate is exercised
  *   SCRIPT:plain <file> <text>      the same call without the escalation (no approval needed)
  *   SCRIPT:echo <text>              replies with <text>
+ *   SCRIPT:fill <n>                 one long text chunk with n repetitions
  *   SCRIPT:ask                      one ask_user_question call (the agent asking the person something)
  *   SCRIPT:envdump <file>           one shell call that writes the shell's environment to <file>
  *   SCRIPT:retrywrite <file> <text> the `write` tool, like a careful model: when the sandbox denies it and offers
@@ -258,6 +259,7 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
     }
     if (name === 'hang') { send({ role: 'assistant', content: '' }); return; }   // headers sent, then silence: a model server that went quiet
     if (name === 'echo') return say([args]);
+    if (name === 'fill') return say(['routine output '.repeat(Math.min(1000, Number.parseInt(args, 10) || 1))]);
     if (name === 'retrywrite' || name === 'retryshell') {
       const [file, ...rest] = args.split(/\s+/);
       const value = rest.join(' ') || 'run';
