@@ -50,6 +50,36 @@ test('the brief stays bounded for noisy, multibyte and legacy event logs', () =>
   assert.match(brief, /Earlier tool outcome/);
 });
 
+const fileHistory = (...paths) => paths.flatMap((path, i) => [
+  event('tool/call', i * 2 + 1, { callId: String(i), name: 'read', arguments: { file_path: path } }),
+  event('tool/result', i * 2 + 2, { message: { toolCallId: String(i), isError: false } }),
+]);
+
+test('the current request can recall an older file and omit newer unrelated results', () => {
+  const files = fileHistory('docs/active spec.md', ...Array.from({ length: 8 }, (_, i) => 'notes/noise-' + i + '.txt'));
+  const previous = workingBrief(files);
+  const focused = workingBrief(files, [], ['Check @"docs/active spec.md" again.']);
+  assert.doesNotMatch(previous, /active spec/);
+  assert.match(focused, /Earlier tool outcome .*docs\/active spec\.md/);
+  assert.doesNotMatch(focused, /notes\/noise/);
+  assert(Buffer.byteLength(focused) < Buffer.byteLength(previous));
+});
+
+test('an active task supplies context for a continuation, with ambiguous names left unassigned', () => {
+  const files = fileHistory('src/policy.mjs', 'app/main.mjs', 'tests/main.mjs', 'other.txt');
+  const checklist = event('todo/write', 20, { todos: [
+    { content: 'Later review other.txt', status: 'pending' },
+    { content: 'Finish src/policy.mjs', status: 'in_progress' },
+  ] });
+  const continued = workingBrief([...files, checklist], [], ['Continue.']);
+  assert.match(continued, /Earlier tool outcome .*src\/policy\.mjs/);
+  assert.doesNotMatch(continued, /Earlier tool outcome .*other\.txt/);
+  assert.match(workingBrief(files, [], ['Check main.mjs.']), /Earlier tool outcome .*other\.txt/);
+  const explicit = workingBrief([...files, checklist], [], ['Focus on tests/main.mjs instead.']);
+  assert.match(explicit, /Earlier tool outcome .*tests\/main\.mjs/);
+  assert.doesNotMatch(explicit, /Earlier tool outcome .*src\/policy\.mjs/);
+});
+
 test('the plugin only adds a brief to an existing human turn in its own session', async () => {
   let hook;
   const jobs = { list: id => [
