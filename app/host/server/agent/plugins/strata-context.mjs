@@ -15,6 +15,7 @@
  * The plugin wraps the token meter and compaction stream once. At adapter preparation it also removes foreign reasoning from the
  * outgoing request, and for local models it sets the request's reply ceiling. The real Harness tests exercise these hooks.
  */
+import { existsSync } from 'node:fs';
 import { replyCap } from '../reply-cut.mjs';
 import { densityOf, estimateMessage, estimateTools, isContextOverflow, MAX_DENSITY, pressureNow, promptTokensOf, splitMessages, summaryBudget, usageOfEvent, WINDOW_SLACK, withSummaryLanguage } from '../context-budget.mjs';
 
@@ -50,6 +51,10 @@ export function projectForeignReasoning(options) {
 }
 
 export function apply(ctx) {
+  const pauseFile = process.env.STRATA_UPDATE_PAUSE_FILE;
+  const paused = () => pauseFile && existsSync(pauseFile);
+  const pauseReason = 'Agent work is paused for the Strata update.';
+  if (pauseFile) ctx.on('tools/pre-execute', (exec, next) => paused() ? { kind: 'deny', reason: pauseReason } : next());
   const meter = ctx.tokenMeter;
   const llm = ctx.llm;
   const log = (level, text) => { try { ctx.logger?.[level]?.(`strata-context: ${text}`); } catch { /* logging never blocks */ } };
@@ -99,6 +104,7 @@ export function apply(ctx) {
     wrapped.add(llm);
     const original = llm.stream;
     llm.stream = function stream(options) {
+      if (paused()) throw new Error(pauseReason);
       if (options?.purpose !== 'compaction') return original.call(this, options);
       return summaryStream.call(this, options, original);
     };
@@ -116,6 +122,7 @@ export function apply(ctx) {
     const original = llm.prepareCall;
     const raised = new WeakSet();
     const prepare = async function prepareCall(config, signal, configure) {
+      if (paused()) throw new Error(pauseReason);
       try { prepareAdapter(config?.provider, raised); } catch (e) { log('warn', `could not prepare the model adapter: ${e.message}`); }
       return original.call(this, config, signal, configure);
     };
@@ -128,6 +135,7 @@ export function apply(ctx) {
     raised.add(adapter);
     const stream = adapter.streamWithSnapshot;
     adapter.streamWithSnapshot = function streamWithSnapshot(options, snapshot) {
+      if (paused()) throw new Error(pauseReason);
       let next = projectForeignReasoning(options);
       try {
         if (isLocalRoute(options?.provider) && options.purpose === undefined) {

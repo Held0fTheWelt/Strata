@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
+import { saveCheckpoint, workspaceState } from './update-checkpoint.mjs';
 import { GatewayClient } from './gateway-client.mjs';
 import { HarnessProcess, resolveHarness, redact, stopStaleAgent } from './harness-runtime.mjs';
 import { StatusReporter } from './status.mjs';
@@ -164,6 +165,13 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   };
   const root = join(dataDir, 'agent');
   const home = join(root, 'home');
+  const checkpointDir = join(root, 'update-checkpoints', randomUUID());
+  const pauseMarker = join(checkpointDir, 'paused');
+  let updatePaused = false;
+  let preparation;
+  function allowWork() {
+    if (updatePaused) throw new AgentUnavailable('Agent work is paused for the Strata update. Restart Strata to resume.', 'update-paused');
+  }
   const sessionsFile = join(root, 'sessions.json');
   mkdirSync(root, { recursive: true });
   /** Which chat's file tools wrote which file, for chats that share a folder (#5008). */
@@ -290,7 +298,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     writeFileSync(patchFile, profile.patch);
     const workdir = join(root, 'run');
     const hp = new HarnessProcess({
-      harness: h, home, patchFile, cwd: workdir, env: profile.env, nodePath, logFile: join(root, 'harness.log'), pidFile: join(root, 'harness.pid'),
+      harness: h, home, patchFile, cwd: workdir, env: { ...profile.env, STRATA_UPDATE_PAUSE_FILE: pauseMarker }, nodePath, logFile: join(root, 'harness.log'), pidFile: join(root, 'harness.pid'),
       onExit: exit => {
         log(`agent · the Harness process exited (code ${exit.code})`);
         if (rt?.hp === hp) { lastError = 'The agent process stopped.'; rt = null; }
@@ -322,6 +330,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   /** Make sure a runtime exists that knows the route this turn needs. */
   async function ensureRuntime(choice, signal) {
     for (;;) {
+      allowWork();
       signal?.throwIfAborted();
       if (starting) { await starting.catch(() => {}); continue; }
       const profile = buildProfileNow();
@@ -442,6 +451,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
    * `signal` means the client went away: the turn keeps running (that is not Stop).
    */
   async function runTurn(options) {
+    allowWork();
     const c = chat(options.chatId);
     if (c.turn || c.starting) throw new AgentUnavailable('This chat is still working. Stop it or wait for it to finish.', 'turn-active');
     // From here until the Harness has the prompt, Stop has no session to cancel; it cancels the start.
@@ -467,7 +477,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
    * a completion notice that carries no request id of ours). It is taken over like any turn, with nothing to send: the page is told (`onWake`) and attaches to it, or reads it when it ends.
    */
   async function startWakeTurn(c, seq) {
-    if (c.turn || c.starting || !c.wakeOptions) return;
+    if (updatePaused || c.turn || c.starting || !c.wakeOptions) return;
     c.starting = true; c.startAbort = new AbortController(); c.startFinished = deferred();
     try { await runTurnInner(c, { ...c.wakeOptions, chatId: c.id, message: '', onFrame: () => {}, requestId: `wake-${randomUUID()}`, adopt: { seq } }); }
     catch (e) { log(`agent · a turn the agent started by itself could not be followed: ${e?.message ?? e}`); }
@@ -480,6 +490,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   }
   function armWake(c, runtime, sessionId, after) {
     c.wake?.close();
+    if (updatePaused) return;
     // `after`: the last event our turn saw, so a turn that began before the watch's first snapshot still wakes the chat (#6070 review)
     c.wake = watchForWake({ gw: runtime.gw, sessionId, after, onWake: seq => { c.wake = null; void startWakeTurn(c, seq); } });
   }
@@ -600,6 +611,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     }
 
     setupSignal.throwIfAborted();
+    allowWork();
     const projector = new TurnProjector({ policy: MODE_PRESETS[appliedMode].approval, window: route.contextWindow, catchUp: true });
     // #4981: a goal gets its own guard (failing calls pause it); the per-turn search and rewrite limits would stop a long goal
     guard = goal ? new GoalGuard() : new TurnGuard({ plan: !!planTask });
@@ -615,6 +627,11 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       research: researchTopic ? { phase: 'gather', nudged: false, waitingStart: false } : null, wake: !!adopt, fix,
     };
     c.turn = turn; c.holding = false;
+    turn.updateSnapshot = () => ({
+      sessionId, requestId, mode: appliedMode, finished: turn.finished, stopping: turn.stopping,
+      text: written.all, reasoning: written.reasoning,
+      followUps: turn.followUps, helpers: [...turn.children.values()].map(child => child.cp.agent())
+    });
     function showFollowUp(entry) {
       if (entry.shown) return;
       entry.shown = true;
@@ -904,8 +921,9 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
         if (item.type === 'event' && item.event.type === 'turn/end' && child.rowPending) emitRow(child, true);
         const { frames, row } = cp.consume(item);
         for (const f of frames) emit(f);
-        if (item.type === 'event' && item.event.type === 'turn/end') { finishChild(child); return; }
+        if (item.type === 'event' && item.event.type === 'turn/end') { child.confirmedEnd = true; finishChild(child); return; }
         if (child.done && !cp.finished) {
+          child.confirmedEnd = false;
           child.done = false;
           child.noticed = false;
           child.limitHit = false;
@@ -941,6 +959,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       const d = e.data ?? {};
       switch (e.type) {
         case 'turn/start':
+          turn.endObserved = false;
           turn.parentOpen = true;
           if (turn.research) turn.research.waitingStart = false;
           turn.cutWaiting = false;
@@ -950,6 +969,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           if (turn.stopping) void boundedRpc(runtime, 'session/cancel', { request: { sessionId } }).catch(() => {});
           break;
         case 'turn/end':
+          turn.endObserved = true;
           turn.parentOpen = false;
           armSettle();
           break;
@@ -1050,6 +1070,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
 
     /** The goal the Harness runs for the plan's next waiting step, and the frames that say so. */
     async function startStep(plan, index) {
+      if (updatePaused) return;
       plans.update(chatId, p => { p.state = 'running'; p.goalStarted = true; p.steps[index].state = 'running'; });
       const now = plans.get(chatId);
       if (planBrief) turn.plan.evidence = new StepEvidence(workspacePath, requirementOf(now.steps[index]));
@@ -1065,6 +1086,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
 
     /** One goal step finished: say so, hand over queued messages, and begin the next step (or end the plan). */
     async function advancePlan() {
+      if (updatePaused) return false;
       const run = turn.plan;
       const plan = plans.get(chatId);
       if (!run || !plan || plan.id !== run.id) return false;
@@ -1109,7 +1131,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
     /** Hand the person's queued messages to the assistant, one at a time, each answered before the next. */
     async function deliverQueued(afterStep) {
       const list = queues.get(chatId) ?? [];
-      while (list.length && !turn.stopping && !turn.finished) {
+      while (list.length && !updatePaused && !turn.stopping && !turn.finished) {
         const item = list.shift();
         if (!list.length) queues.delete(chatId);
         onQueue(chatId, queueView(chatId));
@@ -1130,10 +1152,11 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
      * open (for a few seconds at most); after Stop nobody waits for reports.
      */
     function armSettle() {
+      if (updatePaused && !turn.stopping) return;
       clearTimeout(turn.settleTimer);
       if (turn.finished) return;
       turn.settleTimer = after(turn.stopping ? 1200 : turn.children.size ? 600 : 0, async () => {
-        if (turn.finished || turn.parentOpen || turn.advancing) return;
+        if (turn.finished || turn.parentOpen || turn.advancing || (updatePaused && !turn.stopping)) return;
         if (turn.steerAdmissions.size || turn.pendingSteers.size) { armSettle(); return; }
         const open = [...turn.children.values()];
         if (open.some(c => !c.done)) return;
@@ -1270,6 +1293,7 @@ ${note.text}
     if (turn.finished) return { error: true };
     if (turn.stopBeforePrompt) { projector.ended = { kind: 'aborted', reason: { kind: 'user' } }; finishTurn(null); return { cancelled: true }; }
 
+    if (updatePaused) { await finishTurn(null); return { cancelled: true }; }
     turn.prompted = true;
     if (goal) {
       // A goal run has no prompt of its own: the Harness's goal driver starts the rounds. Everything from now on is ours.
@@ -1372,6 +1396,7 @@ ${note.text}
 
   /** Pause, edit or remove the goal from the goal bar. Instant; resume runs rounds and goes through the chat stream. */
   async function goalControl({ chatId, action, text }) {
+    allowWork();
     const known = sessionMap[chatId]?.sessionId;
     if (!known || !rt?.hp.running) throw new AgentUnavailable('There is no goal in this chat yet.', 'goal-none');
     const current = await rt.gw.rpc('goals/get', { agentId: known }).catch(() => undefined);
@@ -1583,6 +1608,7 @@ ${note.text}
    * carries on.
    */
   async function answerQuestion({ chatId, callId, answers, skip = false }) {
+    allowWork();
     const key = `${chatId}:${callId}`;
     const entry = questions.get(key);
     if (!entry || !rt?.hp.running) throw new AgentUnavailable('That question was already answered, or the assistant has gone on.', 'question-gone');
@@ -1601,6 +1627,7 @@ ${note.text}
    * either comes back as a plain sentence.
    */
   async function messageHelper({ chatId, helperId, text, delivery = 'queue' }) {
+    allowWork();
     const clean = String(text ?? '').trim().slice(0, 8000);
     if (!clean) throw new AgentUnavailable('Type a few words for the helper.', 'helper-empty');
     if (!/^[\w.:@-]{1,160}$/.test(String(helperId ?? ''))) throw new AgentUnavailable('That helper is not known.', 'helper-unknown');
@@ -1628,6 +1655,7 @@ ${note.text}
 
   /** Add input to the parent at its next step while the current chat and helpers keep running. */
   async function steerMessage({ chatId, text }) {
+    allowWork();
     const turn = chats.get(chatId)?.turn;
     if (!turn?.live || turn.finished || turn.stopping || turn.advancing || typeof turn.steer !== 'function') {
       throw new AgentUnavailable('No running assistant can take this message right now.', 'steer-idle');
@@ -1639,6 +1667,7 @@ ${note.text}
 
   /** Queue a message for the running goal. It is delivered between steps, or handed back to the page when the goal ends or pauses. */
   function queueMessage({ chatId, text }) {
+    allowWork();
     const turn = chats.get(chatId)?.turn;
     if (!turn || !turn.goalRun || turn.stopping || turn.finished) throw new AgentUnavailable('No goal is running in this chat, so there is nothing to queue behind. Send the message as usual.', 'queue-idle');
     const clean = String(text ?? '').trim().slice(0, 8000);
@@ -1703,6 +1732,7 @@ ${note.text}
 
   /** Answer one pending approval. `decision` is `approve` or `deny`. */
   async function approve({ chatId, callId, decision }) {
+    allowWork();
     const sessionId = sessionMap[chatId]?.sessionId;
     // A helper agent's question carries the helper's session id in front of its call id. Only a helper that belongs to
     // THIS chat's run can be answered from this chat.
@@ -1854,7 +1884,7 @@ ${note.text}
       } else {
         const runtime = rt;
         const cancel = () => boundedRpc(runtime, 'session/cancel', { request: { sessionId: turn.sessionId } })
-          .then(() => { turn.pendingSteers.clear(); }).catch(() => {});
+          .then(() => { turn.cancelConfirmed = true; turn.pendingSteers.clear(); }).catch(() => {});
         turn.stopDeadline = after(waitMs, () => {
           retireSession(c, turn.sessionId);
           void cancel();
@@ -1932,6 +1962,89 @@ ${note.text}
     return Object.keys(sessionMap).map(chatId => ({ chatId, folder: sessionMap[chatId]?.cwd ?? null, pending: pendingFor(chatId) })).filter(c => c.pending.length);
   }
 
+  // A preparation belongs to this host lifetime. Concurrent windows and the installer
+  // share its result, including an unconfirmed stop. A new host starts a new check.
+  function prepareForUpdate() {
+    if (preparation) return preparation.then(report => {
+      if (!existsSync(report.checkpoint)) throw new Error('The saved update checkpoint is missing.');
+      return report;
+    });
+    updatePaused = true;
+    preparation = checkpointAndStop();
+    return preparation;
+  }
+
+  async function checkpointAndStop() {
+    mkdirSync(checkpointDir, { recursive: true, mode: 0o700 });
+    writeFileSync(pauseMarker, '', { mode: 0o600 });
+    const targets = [...chats.values()];
+    const turns = targets.map(c => ({ c, turn: c.turn, starting: c.starting }));
+    const snapshot = () => turns.map(({ c, turn }) => ({
+      chatId: c.id, sessionId: sessionMap[c.id]?.sessionId, cwd: c.wakeOptions?.workspacePath ?? sessionMap[c.id]?.cwd,
+      plan: plans.get(c.id), queue: queueView(c.id), parent: turn?.updateSnapshot() ?? c.last ?? null
+    }));
+    const before = structuredClone(snapshot());
+    const folders = [...new Set(before.map(s => s.cwd).filter(Boolean))];
+    const receipts = [];
+    const gitState = () => Promise.all(folders.map(workspaceState));
+
+    const until = async (check, ms, reason) => {
+      const end = Date.now() + ms;
+      while (!check()) {
+        if (Date.now() >= end) throw new Error(reason);
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    };
+    try {
+      await saveCheckpoint(checkpointDir, 'before', { at: new Date().toISOString(), chats: before, workspaces: await gitState() });
+      // Some children may already have finished during the Git snapshot. Include
+      // their own terminal event in the receipt just as for interrupted children.
+      const acknowledged = new Set();
+      for (;;) {
+        const helpers = turns.flatMap(({ c, turn }) =>
+          [...(turn?.children.values() ?? [])].filter(child => !acknowledged.has(child)).map(child => ({ c, turn, child })));
+        if (!helpers.length) break;
+        const results = await Promise.allSettled(helpers.map(async ({ c, turn, child }) => {
+          const receipt = { chatId: c.id, helperId: child.id, confirmed: false };
+          receipts.push(receipt);
+          if (!child.done) await beforeAbort(() => turn.stopChild(child), AbortSignal.timeout(helperStopMs));
+          await until(() => child.confirmedEnd, helperStopMs, 'Helper did not confirm its stop: ' + child.id);
+          receipt.confirmed = true;
+          acknowledged.add(child);
+        }));
+        const refused = results.filter(result => result.status === 'rejected');
+        if (refused.length) throw new Error(refused.map(result => result.reason.message).join(', '));
+      }
+      const parentStops = await Promise.allSettled(turns.map(async ({ c, turn, starting: wasStarting }) => {
+        if (!turn && !wasStarting) return;
+        const receipt = { chatId: c.id, confirmed: false };
+        receipts.push(receipt);
+        if (c.turn || c.starting) {
+          const result = await beforeAbort(() => stop(c.id), AbortSignal.timeout(25_000));
+          if (!result.stopped) throw new Error(result.reason ?? 'Parent did not confirm its stop: ' + c.id);
+          if (turn?.prompted && !turn.cancelConfirmed && !turn.endObserved) throw new Error('Parent did not acknowledge cancellation: ' + c.id);
+          receipt.ended = result.ended;
+        }
+        receipt.confirmed = true;
+      }));
+      const failedParents = parentStops.filter(result => result.status === 'rejected');
+      if (failedParents.length) throw new Error(failedParents.map(result => result.reason.message).join(', '));
+      if (starting) await beforeAbort(() => starting, AbortSignal.timeout(startTimeoutMs));
+      await until(() => targets.every(c => !c.turn && !c.starting && !c.holding), controlRpcMs, 'An agent session is still busy.');
+      for (const { turn } of turns) {
+        if (turn && [...turn.children.values()].some(child => !acknowledged.has(child) || !child.confirmedEnd)) throw new Error('A helper has no confirmed end event.');
+      }
+      const harness = rt?.hp;
+      await close();
+      if (harness?.running || existsSync(join(root, 'harness.pid'))) throw new Error('The Harness process has no confirmed exit.');
+      const checkpoint = await saveCheckpoint(checkpointDir, 'ready', { at: new Date().toISOString(), chats: snapshot(), workspaces: await gitState(), receipts });
+      return { checkpoint, receipts };
+    } catch (error) {
+      const report = await saveCheckpoint(checkpointDir, 'incomplete', { receipts, error: error.message, chats: snapshot() });
+      throw new Error(error.message + ' · ' + report);
+    }
+  }
+
   async function close() {
     for (const c of chats.values()) { c.wake?.close(); c.wake = null; }
     const r = rt; rt = null;
@@ -1946,7 +2059,7 @@ ${note.text}
     return c?.turn?.children.get(helperId)?.cp.agent() ?? c?.last?.agents?.find(a => a.id === helperId) ?? null;
   }
 
-  return { compactCommand, messageHelper, stopHelper, helperState, answerQuestion, goalState, goalControl, harnessDir, status, turnOf, runningTurns, wokenTurns, attach, runTurn, goalCommand, planCommand, researchCommand, llmTarget, noteToolMarker, setPlanBriefing, resetSession, reopenPlan, skipStep, planGoal, planControl, planState, steerMessage, queueMessage, cancelQueued, takeQueue, forget, approve, setMode, stop, pendingFor, pendingAll, close, sessionOf: chatId => sessionMap[chatId]?.sessionId ?? null, workingFolder: chatId => sessionMap[chatId]?.cwd ?? null, isRunning: chatId => !!chats.get(chatId)?.turn, _debug: () => ({ rt, sessionMap }) };
+  return { prepareForUpdate, compactCommand, messageHelper, stopHelper, helperState, answerQuestion, goalState, goalControl, harnessDir, status, turnOf, runningTurns, wokenTurns, attach, runTurn, goalCommand, planCommand, researchCommand, llmTarget, noteToolMarker, setPlanBriefing, resetSession, reopenPlan, skipStep, planGoal, planControl, planState, steerMessage, queueMessage, cancelQueued, takeQueue, forget, approve, setMode, stop, pendingFor, pendingAll, close, sessionOf: chatId => sessionMap[chatId]?.sessionId ?? null, workingFolder: chatId => sessionMap[chatId]?.cwd ?? null, isRunning: chatId => !!chats.get(chatId)?.turn, _debug: () => ({ rt, sessionMap }) };
 }
 
 /** A goal that stopped by itself, in words. */

@@ -3595,5 +3595,9 @@
   "s9154": "Messages to this helper",
   "s9155": "The message was sent, but its history could not be saved.",
   "s9156": "No helpers could be updated. A helper that is still running must finish or be stopped first.",
-  "s9157": "Restore this helper before sending it a message."
+  "s9157": "Restore this helper before sending it a message.",
+  "updatePause0": "Save progress and pause all agents for an update",
+  "updatePause1": "Saving agent work and preparing the update…",
+  "updatePause2": "Agent work saved. Ready for update.",
+  "updatePause3": "Update preparation failed"
 }
