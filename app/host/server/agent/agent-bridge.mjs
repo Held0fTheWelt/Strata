@@ -981,12 +981,14 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
             fix.since = Date.now();
             if (turn.plan?.evidence) {
               const evidence = turn.plan.evidence;
-              evidence.correct(followUp.message.text);
+              const changedCheck = evidence.correct(followUp.message.text);
               const plan = plans.get(chatId);
               const at = plan && currentStep(plan);
               if (plan?.id === turn.plan.id && at >= 0) plans.update(chatId, p => {
-                p.steps[at].correction = followUp.message.text.slice(0, 600);
-                p.steps[at].verification = evidence.requirement;
+                const step = p.steps[at];
+                step.correction = followUp.message.text.slice(0, 600);
+                if (changedCheck) step.verificationDirection = step.correction;
+                step.verification = evidence.requirement;
               });
             }
             showFollowUp(followUp);
@@ -1072,14 +1074,16 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       if (evidence?.requirement && !evidence.receipt) {
         const message = evidence.requirement.invalid
           ? 'This plan step still needs a valid read verification rule.'
-          : 'The plan step is paused until the required line is verified with Read.';
+          : typeof evidence.requirement.line === 'string'
+            ? 'The plan step is paused until the required line is verified with Read.'
+            : 'The plan step is paused until the corrected file is verified with Read.';
         emit({ type: 'delta', own: true, text: '\n\n' + message + '\n', key: message });
         for (const frame of settlePlan(null)) emit(frame);
         return false;
       }
       const cards = [...projector.tools.values()].filter(x => x.calledAt >= (written.stepAt ?? 0) - 50 && x.card?.state === 'done').map(x => x.card);
       const summary = evidence?.receipt
-        ? 'Verified ' + evidence.receipt.path + ' at line ' + evidence.receipt.line + '.'
+        ? 'Verified ' + evidence.receipt.path + (evidence.receipt.line === undefined ? ' with Read.' : ' at line ' + evidence.receipt.line + '.')
         : stepSummary(cards, written.step.split(/\n\s*\n/).filter(Boolean).at(-1) ?? written.step);
       plans.update(chatId, p => {
         const step = p.steps[at];

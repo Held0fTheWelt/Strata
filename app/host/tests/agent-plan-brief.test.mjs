@@ -56,3 +56,36 @@ test('only a matching read for the active verification can prove completion', ()
   call(11, 'edit', 'change', 'blue.txt');
   assert.equal(proof.receipt, null);
 });
+
+test('a plain file switch clears the previous receipt and needs a fresh Read of the new file', () => {
+  const cwd = resolve('fixture');
+  const proof = new StepEvidence(cwd, { path: 'original.txt', line: 'original' });
+  const call = (seq, id, path) => proof.observe({ type: 'tool/call', seq, data: { name: 'read', callId: id, arguments: { file_path: path } } });
+  const result = (seq, toolCallId, path, text) => proof.observe({ type: 'tool/result', seq, data: { message: { toolCallId, isError: false }, meta: { path: resolve(cwd, path), lines: [{ number: 1, text }] } } });
+  call(1, 'old', 'original.txt');
+  result(2, 'old', 'original.txt', 'original');
+  assert.equal(proof.receipt.path, 'original.txt');
+  proof.correct('Do not switch to unrelated.txt.');
+  assert.equal(proof.receipt.path, 'original.txt');
+
+  proof.correct('Nimm `notes/new decision.txt` statt `original.txt`.');
+  assert.deepEqual(proof.requirement, { path: 'notes/new decision.txt' });
+  assert.equal(proof.receipt, null);
+  call(3, 'stale', 'original.txt');
+  result(4, 'stale', 'original.txt', 'original');
+  assert.equal(proof.receipt, null);
+  call(5, 'fresh', 'notes/new decision.txt');
+  result(6, 'fresh', 'notes/new decision.txt', 'revised');
+  assert.equal(proof.receipt.seq, 6);
+  assert.equal(proof.receipt.line, undefined);
+
+  proof.correct('Switch to final.txt.');
+  assert.deepEqual(proof.requirement, { path: 'final.txt' });
+  assert.equal(proof.receipt, null);
+  const brief = stepObjective({ title: 'Decision', steps: [{
+    text: 'Verify', verification: proof.requirement, verificationDirection: 'Switch to final.txt.', correction: 'Carry on.',
+  }] }, 0, true);
+  assert.match(brief, /Switch to final\.txt\./);
+  assert.match(brief, /Carry on\./);
+  assert.match(brief, /read on "final\.txt" to verify its current contents/);
+});
