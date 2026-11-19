@@ -123,6 +123,14 @@ On the next user message in an existing agent chat, the Harness can add a short 
 It includes earlier requests, open checklist items, and recent tool outcomes with their source and time. On a resumed edit,
 the agent reads the current file and constructs the edit from that read. The Harness checks the file version before writing.
 
+## Plan step briefs
+
+Set `STRATA_AGENT_PLAN_BRIEF=1` in the host environment to try short briefs for plans started as goals.
+To verify a line in a workspace file, add the suffix `[verify-read relative/file | exact line]` to a step.
+A successful Read of that exact line is required to advance the plan. A live message with a new suffix changes
+the active step's check. Resume tries the step again if the required read was missing. The plan retains the receipt
+with the file, line number, time and tool call.
+
 ## Evidence and publishing
 
 - Cite the release, commit and relevant guide behind each compatibility claim.

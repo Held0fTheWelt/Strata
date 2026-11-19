@@ -31,6 +31,7 @@ import { SkillsUsed, skillInfoFrom } from './skills-used.mjs';
 import { turnEngineSpeed } from './engine-speed.mjs';
 import { TurnGuard, GoalGuard, guardNote, GUARD_NOTES } from './turn-guard.mjs';
 import { ProgressGuard } from './progress-guard.mjs';
+import { requirementOf, StepEvidence } from './plan-brief.mjs';
 import { cutNotice, cutNudge } from './reply-cut.mjs';
 import { MarkerStore, MAX_TOOL_FIXES, FIXING_STATUS, correctionText, endNote } from './tool-fix.mjs';
 import { watchForWake } from './wake-watch.mjs';
@@ -253,6 +254,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   /** TOOLCALL-B: replies whose tool call could not run, as the forwarding endpoint read them, until a turn takes one (tool-fix.mjs). */
   const toolMarkers = new MarkerStore();
   const forwardAlways = env.STRATA_AGENT_FORWARD !== '0';
+  const planBrief = env.STRATA_AGENT_PLAN_BRIEF === '1';
   const noteToolMarker = marker => toolMarkers.add(marker);
 
   function harnessInfo() { return resolveHarness({ env, componentsDir, bundledDir }); }
@@ -824,6 +826,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           finalAnswer = !hideDeltas && !blocks.some(block => block.type === 'tool-call')
             && blocks.some(block => block.type === 'text' && block.text?.trim());
         } else if (event.type === 'turn/start') finalAnswer = false;
+        turn.plan?.evidence?.observe(event);
         watchParent(event);
         const stalled = progress.observe(event);
         // Waiting for a helper to report is legitimate work. Its own guard is independent.
@@ -976,6 +979,16 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
             turn.pendingSteers.delete(id);
             fix.texts.add(followUp.message.text);
             fix.since = Date.now();
+            if (turn.plan?.evidence) {
+              const evidence = turn.plan.evidence;
+              evidence.correct(followUp.message.text);
+              const plan = plans.get(chatId);
+              const at = plan && currentStep(plan);
+              if (plan?.id === turn.plan.id && at >= 0) plans.update(chatId, p => {
+                p.steps[at].correction = followUp.message.text.slice(0, 600);
+                p.steps[at].verification = evidence.requirement;
+              });
+            }
             showFollowUp(followUp);
             if (!turn.parentOpen) armSettle();
           }
@@ -1009,7 +1022,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
     function settlePlan(failure) {
       if (planTask) {
         if (failure || (turn.stopping && !turn.guard)) return [];
-        const parsed = parsePlan(written.all, planTask);
+        const parsed = parsePlan(written.all, planTask, planBrief);
         if (!parsed) return [];
         const plan = plans.create(chatId, { title: parsed.title, steps: parsed.steps, request: planTask, ...(turn.guard ? { caution: GUARD_NOTES[turn.guard] } : {}) });
         return [publishPlan('proposed', plan)];
@@ -1037,7 +1050,9 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
     async function startStep(plan, index) {
       plans.update(chatId, p => { p.state = 'running'; p.goalStarted = true; p.steps[index].state = 'running'; });
       const now = plans.get(chatId);
-      await boundedRpc(runtime, 'goals/create', { agentId: sessionId, request: { objective: stepObjective(now, index) } });
+      if (planBrief) turn.plan.evidence = new StepEvidence(workspacePath, requirementOf(now.steps[index]));
+      const objective = stepObjective(now, index, planBrief);
+      await boundedRpc(runtime, 'goals/create', { agentId: sessionId, request: { objective } });
       if (turn.finished || turn.stopping) return;
       written.step = ''; written.stepAt = Date.now();
       emit(stepFrame(now, index));
@@ -1053,9 +1068,25 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       if (!run || !plan || plan.id !== run.id) return false;
       const at = currentStep(plan);
       if (at < 0) return false;
+      const evidence = run.evidence;
+      if (evidence?.requirement && !evidence.receipt) {
+        const message = evidence.requirement.invalid
+          ? 'This plan step still needs a valid read verification rule.'
+          : 'The plan step is paused until the required line is verified with Read.';
+        emit({ type: 'delta', own: true, text: '\n\n' + message + '\n', key: message });
+        for (const frame of settlePlan(null)) emit(frame);
+        return false;
+      }
       const cards = [...projector.tools.values()].filter(x => x.calledAt >= (written.stepAt ?? 0) - 50 && x.card?.state === 'done').map(x => x.card);
-      const summary = stepSummary(cards, written.step.split(/\n\s*\n/).filter(Boolean).at(-1) ?? written.step);
-      plans.update(chatId, p => { p.steps[at].state = 'done'; p.steps[at].summary = summary; });
+      const summary = evidence?.receipt
+        ? 'Verified ' + evidence.receipt.path + ' at line ' + evidence.receipt.line + '.'
+        : stepSummary(cards, written.step.split(/\n\s*\n/).filter(Boolean).at(-1) ?? written.step);
+      plans.update(chatId, p => {
+        const step = p.steps[at];
+        step.state = 'done';
+        step.summary = summary;
+        if (evidence?.receipt) step.evidence = evidence.receipt;
+      });
       let now = plans.get(chatId);
       emit(stepFrame(now, at));
       emit({ type: 'delta', own: true, text: `\n\n${stepLine(at, now.steps.length, now.steps[at].text, 'done')}\n` });
@@ -1185,7 +1216,9 @@ ${note.text}
             if (more && !turn.finished && !turn.stopping) { turn.settleTimer = after(700, armSettle); return; }
           }
 
-          if (turn.goalRun && current) { const line = goalEnding(current); if (line) emit({ type: 'delta', text: line }); }
+          if (turn.goalRun && current && (!turn.plan?.evidence?.requirement || turn.plan.evidence.receipt || current.phase !== 'complete')) {
+            const line = goalEnding(current); if (line) emit({ type: 'delta', text: line });
+          }
           if (turn.goalRun) await announceGoal(true);
         }
         finishTurn(null);
@@ -1244,7 +1277,9 @@ ${note.text}
           turn.plan = { id: plan.id, once: !!planRun.once };
           const at = currentStep(plan);
           if (at < 0) throw new AgentUnavailable('Every step of this plan is already done.', 'plan-done');
-          if (goal.action === 'resume' && plan.goalStarted) {
+          const recheck = planBrief && goal.action === 'resume' && (await goalGet())?.phase === 'complete';
+          if (goal.action === 'resume' && plan.goalStarted && !recheck) {
+            if (planBrief) turn.plan.evidence = new StepEvidence(workspacePath, requirementOf(plan.steps[at]));
             plans.update(chatId, p => { p.state = 'running'; p.steps[at].state = 'running'; });
             await startGoal(runtime, sessionId, goal);
             emit(publishPlan('step', plans.get(chatId)));
@@ -1314,12 +1349,13 @@ ${note.text}
   /** The goal as the page and the goal bar see it (notes-split-agent3.md), or null. */
   function goalObject(view, chatId = null) {
     if (!view) return null;
-    const phase = ['active', 'paused', 'complete', 'blocked'].includes(view.phase) ? view.phase : 'blocked';
+    let phase = ['active', 'paused', 'complete', 'blocked'].includes(view.phase) ? view.phase : 'blocked';
     // A goal that is running a plan (or the points of a goal) shows the plan's title and which step it is on.
     const plan = chatId ? plans.get(chatId) : null;
     const running = plan && plan.goalStarted && ['running', 'paused'].includes(plan.state) ? plan : null;
     const at = running ? running.steps.findIndex(x => x.state !== 'done' && x.state !== 'skipped') : -1;
     const step = running && at >= 0 ? { index: at + 1, total: running.steps.length, text: running.steps[at].text } : null;
+    if (planBrief && running?.state === 'paused' && at >= 0 && phase === 'complete' && requirementOf(running.steps[at])) phase = 'paused';
     return { objective: step ? running.title : String(view.objective ?? ''), ...(step ? { step } : {}), phase, round: view.roundsStarted ?? 0, maxRounds: view.maxGoalRounds ?? null, ...(phase === 'blocked' ? { blocked: plainBlocker(view.blockedReason) } : {}) };
   }
 
@@ -1409,7 +1445,7 @@ ${note.text}
       return runTurn({ ...options, goal: { action: 'resume' }, ...(goalPlan ? { planRun: goalPlan } : {}) });
     }
     // A goal whose own words hold numbered points ("1. ... 2. ... 3. ...") runs point by point, each one reported.
-    const points = parsePoints(text);
+    const points = parsePoints(text, planBrief);
     if (points) {
       const plan = plans.create(chatId, { title: points.title, steps: points.steps, request: text, source: 'goal', state: 'approved' });
       onPlan(chatId, 'approved', planView(plan));
@@ -1453,7 +1489,7 @@ ${note.text}
         ? 'A plan is waiting for you above. Approve it, edit it or reject it, or type /plan followed by something else to make a new one.'
         : 'Type /plan followed by what you want done, for example: /plan build a small pagoda page. I will look around and write a plan; nothing changes until you approve it.');
     }
-    return runTurn({ ...options, message: planPrompt(task), planTask: task, mode: 'plan' });
+    return runTurn({ ...options, message: planPrompt(task, planBrief), planTask: task, mode: 'plan' });
   }
 
   /**
@@ -1486,7 +1522,7 @@ ${note.text}
     const plan = planOf(chatId, planId);
     if (action === 'edit') {
       mustBeOpen(plan);
-      const next = editedSteps(steps, plan.steps);
+      const next = editedSteps(steps, plan.steps, planBrief);
       const t = String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
       plans.update(chatId, p => { p.steps = next; if (t) p.title = t; p.state = 'proposed'; });
       onPlan(chatId, 'edited', planView(plans.get(chatId)));
