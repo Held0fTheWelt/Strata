@@ -741,29 +741,33 @@ export function parkMessage(sessionId: string, text: string) {
   set({ parked: { ...state.parked, [sessionId]: [...(state.parked[sessionId] ?? []), clean] } });
 }
 
-/** Keep a live follow-up visible even if its stream frame arrives late or the
- * page briefly reconnects. The engine's id is shared with that frame, so the
- * two paths naturally deduplicate and the saved transcript remains one copy. */
-function recordAgentFollowUp(sessionId: string, value: { id?: unknown; text?: unknown; at?: unknown } | null | undefined) {
-  if (typeof value?.id !== 'string' || typeof value.text !== 'string' || typeof value.at !== 'string') return;
-  const message: ChatMessage = { id: value.id, role: 'user', content: value.text, at: value.at };
+/** Put a live follow-up between the current reply and a new continuation. The
+ * Harness keeps one streaming turn, but its transcript must retain the actual
+ * order: text written before the follow-up, the follow-up, then later text. */
+function recordAgentFollowUp(sessionId: string, value: { id?: unknown; text?: unknown; at?: unknown } | null | undefined, replyId: string): string | null {
+  if (typeof value?.id !== 'string' || typeof value.text !== 'string' || typeof value.at !== 'string') return null;
+  const { id, text, at } = value;
+  const message: ChatMessage = { id, role: 'user', content: text, at };
+  const continuationId = uid('m');
+  let recorded = false;
   patchSession(sessionId, session => {
     if (session.messages.some(existing => existing.id === message.id)) return session;
     const quotes = takeQuoteSources(message.content);
     const next = quotes ? { ...message, quotes } : message;
-    // A live turn has one streaming reply. Keep the follow-up adjacent to that
-    // reply rather than appending it after a response that has already begun.
-    const replyIndex = session.messages.findIndex(existing => existing.role === 'assistant' && existing.streaming);
-    const at = replyIndex < 0 ? session.messages.length : replyIndex;
-    return { ...session, updatedAt: new Date().toISOString(), messages: [...session.messages.slice(0, at), next, ...session.messages.slice(at)] };
+    const replyIndex = session.messages.findIndex(existing => existing.id === replyId);
+    if (replyIndex < 0) return { ...session, updatedAt: new Date().toISOString(), messages: [...session.messages, next] };
+    const reply = session.messages[replyIndex];
+    const continuation: ChatMessage = { id: continuationId, role: 'assistant', content: '', at, streaming: true };
+    recorded = true;
+    return { ...session, updatedAt: new Date().toISOString(), messages: [...session.messages.slice(0, replyIndex), { ...reply, streaming: false }, next, continuation, ...session.messages.slice(replyIndex + 1)] };
   });
+  return recorded ? continuationId : null;
 }
 
 /** Tell the parent in its own live session. A plain chat or a turn that just ended can accept it as a regular follow-up instead. */
 export async function steerMessage(sessionId: string, message: string): Promise<boolean> {
   try {
-    const receipt = await api.post<{ message?: { id?: unknown; text?: unknown; at?: unknown } }>('/api/chat/steer', { sessionId, message });
-    recordAgentFollowUp(sessionId, receipt.message);
+    await api.post('/api/chat/steer', { sessionId, message });
     return true;
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) return false;
@@ -2299,7 +2303,8 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
           if (frame.event === 'proposed' && planned && typeof planned.id === 'string') { const pid = planned.id; patchAssistant(m => ({ ...m, planId: pid })); }
         } else if (type === 'agent-follow-up') {
           const { id, text, at } = (frame.message ?? {}) as { id?: unknown; text?: unknown; at?: unknown };
-          recordAgentFollowUp(sessionId, { id, text, at });
+          const continuation = recordAgentFollowUp(sessionId, { id, text, at }, assistantId);
+          if (continuation) assistantId = continuation;
         } else if (type === 'queued-message') {
           applyQueueFrame(sessionId, frame.queue);
           const sent = frame.message as { text?: unknown } | undefined;

@@ -27,22 +27,3 @@ export function parkedReady(viewed: string | null | undefined, active: string | 
 export function isLiveFollowUp(message: Pick<ChatMessage, 'id' | 'role'>): boolean {
   return message.role === 'user' && message.id.startsWith('steer-');
 }
-
-/** The store puts live follow-ups before the reply so the streaming and
- * reattach paths can keep writing to that reply. Draw them after the reply's
- * work in the transcript, where the person is following the current run. */
-export function visibleChatMessages<T extends Pick<ChatMessage, 'id' | 'role' | 'at'>>(messages: readonly T[]): readonly T[] {
-  let ordered: T[] | undefined;
-  for (let i = 0; i < messages.length; i++) {
-    if (!isLiveFollowUp(messages[i])) continue;
-    const start = i;
-    while (i + 1 < messages.length && isLiveFollowUp(messages[i + 1])) i++;
-    const reply = messages[i + 1];
-    if (reply?.role !== 'assistant' || !(Date.parse(reply.at) <= Date.parse(messages[start].at))) continue;
-    ordered ??= messages.slice();
-    // Keep the receipt order if several messages arrive during one reply.
-    ordered.splice(start, i - start + 2, reply, ...messages.slice(start, i + 1));
-    i++;
-  }
-  return ordered ?? messages;
-}

@@ -359,8 +359,8 @@ test('#4783 the composer acts on the choice, the default keeps today\'s behaviou
   const chat = src('screens/Chat.tsx');
   const steer = chat.slice(chat.indexOf("if (plan === 'steer')"), chat.indexOf("void queueMessage(session.id"));
   assert.match(steer, /steerMessage\(id, out\)/);
-  assert.match(src('lib/store.ts'), /recordAgentFollowUp\(sessionId, receipt\.message\);/, 'a confirmed live message is written to the transcript even when its stream frame is late');
-  assert.match(src('lib/store.ts'), /session\.messages\.some\(existing => existing\.id === message\.id\)/, 'the later stream frame does not duplicate the saved message');
+  assert.match(src('lib/store.ts'), /await api\.post\('\/api\/chat\/steer', \{ sessionId, message \}\);/, 'the receipt leaves transcript ordering to the ordered agent stream');
+  assert.match(src('lib/store.ts'), /type === 'agent-follow-up'/, 'the agent stream records the accepted live message');
   assert.match(steer, /if \(!delivered\) parkMessage\(id, out\)/);
   assert.doesNotMatch(steer, /stopStreaming\(/);
   assert.match(chat, /if \(plan === 'goal'\) \{ clearQuotes\(session\.id\); parkMessage\(session\.id, out\); return; \}/);
@@ -372,26 +372,17 @@ test('#4783 the composer acts on the choice, the default keeps today\'s behaviou
   assert.match(src('screens/Settings.tsx'), /setWhileBusy\(value as typeof prefs\.whileBusy\)/);
 });
 
-test('live follow-ups appear after the reply they were sent into, without moving the stored reply', async () => {
-  const { visibleChatMessages, isLiveFollowUp } = await load('lib/while-busy.ts');
-  const row = (id, role, minute) => ({ id, role, at: new Date(Date.UTC(2026, 0, 1, 12, minute)).toISOString() });
-  const prompt = row('prompt', 'user', 0);
-  const first = row('steer-1', 'user', 2);
-  const second = row('steer-2', 'user', 3);
-  const running = { ...row('reply', 'assistant', 0), streaming: true };
-  const stored = Object.freeze([prompt, first, second, running]);
-  assert.equal(isLiveFollowUp(first), true);
-  assert.equal(isLiveFollowUp(prompt), false);
-  assert.deepEqual(visibleChatMessages(stored), [prompt, running, first, second]);
-  assert.equal(stored.at(-1), running, 'reattach can still find the active reply');
-  const next = row('next', 'assistant', 5);
-  assert.deepEqual(visibleChatMessages([...stored, next]), [prompt, running, first, second, next]);
-  const withoutReply = [prompt, first, next];
-  assert.equal(visibleChatMessages(withoutReply), withoutReply, 'a later reply stays after a follow-up already in display order');
-  assert.equal(visibleChatMessages([first]).at(-1), first, 'a receipt with no matching reply is visible');
+test('live follow-ups split the streamed answer, so later agent text stays below the message that caused it', async () => {
+  const { isLiveFollowUp } = await load('lib/while-busy.ts');
+  assert.equal(isLiveFollowUp({ id: 'steer-1', role: 'user' }), true);
+  assert.equal(isLiveFollowUp({ id: 'prompt', role: 'user' }), false);
+  const store = src('lib/store.ts');
+  assert.match(store, /const continuationId = uid\('m'\);/);
+  assert.match(store, /messages: \[\.\.\.session\.messages\.slice\(0, replyIndex\), \{ \.\.\.reply, streaming: false \}, next, continuation/);
+  assert.match(store, /const continuation = recordAgentFollowUp\(sessionId, \{ id, text, at \}, assistantId\);\s*if \(continuation\) assistantId = continuation;/);
   const chat = src('screens/Chat.tsx');
-  assert.match(chat, /displayedMessages\.at\(-1\)\?\.role === 'user'/, 'sending catches up to the displayed bottom');
-  assert.match(chat, /m\.id === session\.messages\.at\(-1\)\?\.id/, 'the active assistant retains its status and actions');
+  assert.doesNotMatch(chat, /visibleChatMessages/, 'the view keeps the persisted temporal order');
+  assert.match(chat, /session\?\.messages\.slice\(seenMessages\.current\)\.some\(message => message\.role === 'user'\)/, 'sending catches up even though the continuation is now the last row');
 });
 
 test('#4783 the new sentences are translated', async () => {
