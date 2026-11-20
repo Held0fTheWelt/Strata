@@ -16,6 +16,7 @@
  * outgoing request, and for local models it sets the request's reply ceiling. The real Harness tests exercise these hooks.
  */
 import { existsSync } from 'node:fs';
+import { optimizeContext, savedContextOptimizer } from '../context-optimizer.mjs';
 import { replyCap } from '../reply-cut.mjs';
 import { densityOf, estimateMessage, estimateTools, isContextOverflow, MAX_DENSITY, pressureNow, promptTokensOf, splitMessages, summaryBudget, usageOfEvent, WINDOW_SLACK, withSummaryLanguage } from '../context-budget.mjs';
 
@@ -50,13 +51,16 @@ export function projectForeignReasoning(options) {
   return changed ? { ...options, messages } : options;
 }
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
   const pauseFile = process.env.STRATA_UPDATE_PAUSE_FILE;
   const paused = () => pauseFile && existsSync(pauseFile);
   const pauseReason = 'Agent work is paused for the Strata update.';
   if (pauseFile) ctx.on('tools/pre-execute', (exec, next) => paused() ? { kind: 'deny', reason: pauseReason } : next());
   const meter = ctx.tokenMeter;
   const llm = ctx.llm;
+  const optimizer = savedContextOptimizer(config.contextOptimizer);
+  let optimizing = false;
+  let lastOptimization = null;
   const log = (level, text) => { try { ctx.logger?.[level]?.(`strata-context: ${text}`); } catch { /* logging never blocks */ } };
 
   // 1. The measured size of the prompt, from the model server's own report for each answer.
@@ -167,7 +171,8 @@ export function apply(ctx) {
           const config = session.requestHeader?.()?.config;
           let window = 0;
           if (config) window = (await llm.resolveModelInfo(config.provider, config.model))?.context?.contextWindow ?? 0;
-          return { kind: 'success', text: JSON.stringify({ tokens, window }) };
+          const outcome = lastOptimization?.sessionId === session.id ? lastOptimization.outcome : null;
+          return { kind: 'success', text: JSON.stringify({ tokens, window, ...(outcome ? { optimizer: outcome } : {}) }) };
         } catch (e) { return { kind: 'error', text: `strata-context: ${e.message}` }; }
       },
     });
@@ -187,6 +192,28 @@ export function apply(ctx) {
   const refusedForSize = finish => finish?.kind === 'error' && isContextOverflow(finish.failure ?? finish);
 
   async function* summaryStream(options, original) {
+    if (optimizer.enabled && !optimizing) {
+      const started = performance.now();
+      optimizing = true;
+      let result;
+      try { result = await optimizeContext(optimizer, options); }
+      catch { result = { reason: 'optimizer-failed' }; }
+      finally { optimizing = false; }
+      if (paused()) throw new Error(pauseReason);
+      options.signal?.throwIfAborted();
+      const elapsed = Math.round(performance.now() - started);
+      const outcome = result.text
+        ? { state: 'selected', sourceBytes: result.sourceBytes, outputBytes: result.outputBytes, durationMs: elapsed }
+        : { state: 'fallback', reason: result.reason, durationMs: elapsed };
+      lastOptimization = { sessionId: options.sessionId, outcome };
+      if (result.text) {
+        log('info', `Context Optimizer selected excerpts (${result.sourceBytes} → ${result.outputBytes} bytes, ${elapsed} ms)`);
+        yield { type: 'text-delta', index: 0, text: result.text };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+        return;
+      }
+      log('info', `Context Optimizer used standard compaction (${result.reason}, ${elapsed} ms)`);
+    }
     options = { ...options, messages: withSummaryLanguage(options.messages) };   // #4750: the summary follows the conversation's language
     let window = 0;
     try { window = (await llm.resolveModelInfo(options.provider, options.model, options.signal))?.context?.contextWindow ?? 0; } catch { window = 0; }

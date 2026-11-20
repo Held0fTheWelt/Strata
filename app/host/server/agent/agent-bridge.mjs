@@ -157,7 +157,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
  * @param {string} [options.nodePath]                   the Node runtime that runs the Harness
  * @param {(line:string)=>void} [options.log]
  */
-export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = null, gate = true, localInstances, connections, tools = () => undefined, defaultLocalId = () => null, skillsDir = () => null, onGoal = () => {}, onPlan = () => {}, onQueue = () => {}, onWake = () => {}, proxyBase = null, searchMock = null, expertSampling = () => null, engineProgress = () => null, engineGraceMs = 30 * 60_000, helperLimitMs = () => 0, stallMs = 4 * 60_000, stallToolMs = 20 * 60_000, env = process.env, nodePath = process.execPath, log = () => {}, liveMs = 90_000, startRuntimeImpl = null, startTimeoutMs = 120_000, sessionReadyMs = 60_000, sessionRetryMs = 1_500, restartWaitMs = 120_000, controlRpcMs = 15_000, helperStopMs = 10_000 }) {
+export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = null, gate = true, localInstances, connections, tools = () => undefined, defaultLocalId = () => null, skillsDir = () => null, onGoal = () => {}, onPlan = () => {}, onQueue = () => {}, onWake = () => {}, proxyBase = null, searchMock = null, expertSampling = () => null, engineProgress = () => null, engineGraceMs = 30 * 60_000, helperLimitMs = () => 0, contextOptimizer = () => null, stallMs = 4 * 60_000, stallToolMs = 20 * 60_000, env = process.env, nodePath = process.execPath, log = () => {}, liveMs = 90_000, startRuntimeImpl = null, startTimeoutMs = 120_000, sessionReadyMs = 60_000, sessionRetryMs = 1_500, restartWaitMs = 120_000, controlRpcMs = 15_000, helperStopMs = 10_000 }) {
   const boundedRpc = (runtime, method, args, signal = null) => {
     const deadline = AbortSignal.timeout(controlRpcMs);
     const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
@@ -234,6 +234,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   /** FIX-APP A5: what the person is told when the restart of the Harness cannot start because another chat is working. A change in Settings -> Tools is not "the list of models". */
   const BUSY_WORDS = {
     tools: 'Another chat is still working, so your new Tools settings are not in use yet. Send your message again when that chat has finished.',
+    optimizer: 'Another chat is still working, so the new Context Optimizer settings are not in use yet. Try again when it finishes.',
     models: 'Another chat is still working and the list of models changed. Try again when it finishes.',
   };
   const waitIdle = (signal, ms, why = 'models') => new Promise((resolve, reject) => {
@@ -248,10 +249,12 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   let shapeTargets = {};
   function buildProfileNow() {
     const toolSettings = tools();
+    const optimizer = contextOptimizer();
     const profile = buildProfile({
       local: localInstances(), connections: connections(), gate, tools: toolSettings, skillsDir: skillsDir(),
-      proxyBase, searchMock, defaultLocalId: defaultLocalId(), workingMemory: env.STRATA_AGENT_WORKING_MEMORY === '1',
+      proxyBase, searchMock, defaultLocalId: defaultLocalId(), workingMemory: env.STRATA_AGENT_WORKING_MEMORY === '1', contextOptimizer: optimizer,
     });
+    profile.optimizerKey = optimizer?.enabled ? JSON.stringify(optimizer) : null;
     shapeTargets = profile.shapeTargets ?? {};
     // FIX-APP A5: which Settings -> Tools values this profile was made from (compared, never shown or logged), so a restart that waits for other chats can say whether the Tools
     // settings or the model list is why (the tools signature moves with a model change too).
@@ -344,7 +347,8 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       if (known) return { rt, route };
       starting = (async () => {
         if (rt?.hp.running) {
-          await waitIdle(signal, restartWaitMs, rt.profile.toolsKey !== profile.toolsKey ? 'tools' : 'models');
+          const why = rt.profile.optimizerKey !== profile.optimizerKey ? 'optimizer' : rt.profile.toolsKey !== profile.toolsKey ? 'tools' : 'models';
+          await waitIdle(signal, restartWaitMs, why);
           const old = rt; rt = null;
           old.events?.close(); old.gw.close(); await old.hp.stop();
         }
