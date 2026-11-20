@@ -3594,5 +3594,10 @@
   "s9154": "Mensajes para este ayudante",
   "s9155": "Se envió el mensaje, pero no se pudo guardar en el historial.",
   "s9156": "No se pudo actualizar ningún ayudante. Los que siguen activos deben terminar o detenerse primero.",
-  "s9157": "Restaura este ayudante antes de enviarle un mensaje."
+  "s9157": "Restaura este ayudante antes de enviarle un mensaje.",
+  "updatePauseButton": "Pausar para actualizar",
+  "updatePause0": "Guardar el progreso y pausar todos los agentes para actualizar",
+  "updatePause1": "Guardando el trabajo de los agentes y preparando la actualización…",
+  "updatePause2": "Trabajo guardado. Todo listo para actualizar.",
+  "updatePause3": "No se pudo preparar la actualización"
 }
