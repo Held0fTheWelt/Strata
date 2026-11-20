@@ -30,6 +30,8 @@ import { DeliverableTracker, ActivityGroups, FolderClaims } from './deliverables
 import { SkillsUsed, skillInfoFrom } from './skills-used.mjs';
 import { turnEngineSpeed } from './engine-speed.mjs';
 import { TurnGuard, GoalGuard, guardNote, GUARD_NOTES } from './turn-guard.mjs';
+import { ProgressGuard } from './progress-guard.mjs';
+import { requirementOf, StepEvidence } from './plan-brief.mjs';
 import { cutNotice, cutNudge } from './reply-cut.mjs';
 import { MarkerStore, MAX_TOOL_FIXES, FIXING_STATUS, correctionText, endNote } from './tool-fix.mjs';
 import { watchForWake } from './wake-watch.mjs';
@@ -45,7 +47,7 @@ export function agentProvider(route, { budget = 0, sampling = null, forwardAlway
 }
 
 /** How often one turn asks the agent to carry on after a reply the length limit cut (each time in smaller pieces). */
-export const MAX_CUT_RETRIES = 2;
+export const MAX_RECOVERY_PROMPTS = 2;
 /** Replies the agent started by itself (a background command finished) that ended while no page was attached, kept per chat until a page takes them (#6070 review). */
 export const WOKEN_KEPT = 8;
 import { buildAnswer, parseQuestions } from './user-questions.mjs';
@@ -238,7 +240,10 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   let shapeTargets = {};
   function buildProfileNow() {
     const toolSettings = tools();
-    const profile = buildProfile({ local: localInstances(), connections: connections(), gate, tools: toolSettings, skillsDir: skillsDir(), proxyBase, searchMock, defaultLocalId: defaultLocalId() });
+    const profile = buildProfile({
+      local: localInstances(), connections: connections(), gate, tools: toolSettings, skillsDir: skillsDir(),
+      proxyBase, searchMock, defaultLocalId: defaultLocalId(), workingMemory: env.STRATA_AGENT_WORKING_MEMORY === '1',
+    });
     shapeTargets = profile.shapeTargets ?? {};
     // FIX-APP A5: which Settings -> Tools values this profile was made from (compared, never shown or logged), so a restart that waits for other chats can say whether the Tools
     // settings or the model list is why (the tools signature moves with a model change too).
@@ -249,6 +254,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   /** TOOLCALL-B: replies whose tool call could not run, as the forwarding endpoint read them, until a turn takes one (tool-fix.mjs). */
   const toolMarkers = new MarkerStore();
   const forwardAlways = env.STRATA_AGENT_FORWARD !== '0';
+  const planBrief = env.STRATA_AGENT_PLAN_BRIEF === '1';
   const noteToolMarker = marker => toolMarkers.add(marker);
 
   function harnessInfo() { return resolveHarness({ env, componentsDir, bundledDir }); }
@@ -490,9 +496,12 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     signal?.addEventListener('abort', () => { subscribers.delete(onFrame); }, { once: true });
     // What the assistant itself wrote in this run (not our own step lines): a plan turn reads its plan from it, a step reads its summary.
     const written = { all: '', step: '', reasoning: '' };
+    const progress = new ProgressGuard();
+    let finalAnswer = false;
     // TOOLCALL-B: the texts this turn sent the assistant (a marker whose request carries one is this turn's), the time of its newest own event
     // (a marker from before it is not about the reply that just ended), and the corrections asked for in a row.
-    const fix = { texts: new Set(), since: Date.now(), count: 0, total: 0, waiting: false, ended: false };
+    const fix = { texts: new Set(), since: Date.now(), count: 0, waiting: false, ended: null };
+    let recoveryPrompts = 0;
     // The frame that closed the turn, kept with the turn's text for a page that comes back after it ended (attach).
     let terminal = null;
     // The turn guard (turn-guard.mjs): counts failing searches, searches, plan rewrites and a nearly full context. Set up once the route is known.
@@ -593,7 +602,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     setupSignal.throwIfAborted();
     const projector = new TurnProjector({ policy: MODE_PRESETS[appliedMode].approval, window: route.contextWindow, catchUp: true });
     // #4981: a goal gets its own guard (failing calls pause it); the per-turn search and rewrite limits would stop a long goal
-    guard = goal ? new GoalGuard() : new TurnGuard({ plan: !!planTask, contextMax: route.kind === 'local' ? route.contextWindow : 0 });   // a saved connection's window is often only assumed: never judged by a guess
+    guard = goal ? new GoalGuard() : new TurnGuard({ plan: !!planTask });
     projector.onStatus = update => { if (!turn?.parentOpen && turn?.children.size && [...turn.children.values()].some(h => !h.done) && update.phase === 'waiting') return; reporter.set(update); };
     const turn = {
       sessionId, projector, route, runtime, requestId, live: !!adopt, lastSeq: adopt ? adopt.seq - 1 : -1,
@@ -609,6 +618,8 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     function showFollowUp(entry) {
       if (entry.shown) return;
       entry.shown = true;
+      entry.message.at = new Date().toISOString();
+      progress.newInstruction();
       turn.followUps.push(entry.message);
       emit({ type: 'agent-follow-up', message: entry.message });
     }
@@ -708,7 +719,10 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       // The turn guard: a turn the app stopped, or one that ended with no words, always ends with one plain message (a plan card carries it itself).
       let noteReason = turn.guard ?? null;
       // TOOLCALL-B: the model wrote calls that could not run after two corrections in a row: one plain sentence, nothing else added.
-      if (fix.ended && !noteReason && !failure) { noteReason = 'tool-calls'; extra.push(endNote()); }
+      if (fix.ended && !noteReason && !failure) {
+        noteReason = fix.ended;
+        if (noteReason === 'tool-calls') extra.push(endNote());
+      }
       // A reply the length limit cut ends with a sentence that says so (and what was lost), never with silence (AGENT-LOST).
       const cutEnd = !failure && !turn.stopping && projector.ended?.kind === 'max-tokens';
       if (cutEnd && !noteReason) {
@@ -717,14 +731,20 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
 
 ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       }
-      if (!noteReason && !cutEnd && guard && !failure && !turn.stopping && !turn.goalRun) {
-        noteReason = guard.silent({ ended: projector.ended, wrote: projector.emittedAny === true, acted: projector.tools.size > 0, contextTokens: projector.contextTokens });
+      const emptyCompletion = projector.ended?.kind === 'error' && projector.ended.error?.code === 'EMPTY_RESPONSE';
+      if (!noteReason && !cutEnd && guard && !failure && !turn.stopping && !turn.goalRun && !emptyCompletion) {
+        noteReason = guard.silent({ ended: projector.ended, wrote: finalAnswer, acted: projector.tools.size > 0 });
       }
       if (noteReason && !extra.some(f => f.type === 'plan' && f.event === 'proposed')) { const note = guardNote(noteReason); if (note) extra.push(note); }
       for (const f of extra) emit(f);
       // The answer speed of a turn on this computer is the engine's own (tokens it produced over its decode time, as the Monitor shows it).
       const engine = !failure && route.kind === 'local' ? await engineSpeedOf(route, projector) : null;
       const frames = failure ? [{ type: 'error', message: plainAgentFailure(failure), details: failure, code: 'AGENT_STOPPED' }] : projector.finish({ model: route.name, contextMax: route.contextWindow, engine });
+      if (!failure && emptyCompletion && !turn.stopping) {
+        const key = GUARD_NOTES[projector.tools.size > 0 ? 'work-only' : 'empty'];
+        Object.assign(frames.at(-1), { message: key, key, details: projector.ended.error.message });
+      }
+      if (noteReason && frames.at(-1)?.type === 'done') frames.at(-1).noteReason = noteReason;
       for (const f of frames.slice(0, -1)) emit(f);
       // Messages typed while the goal ran and not delivered between steps go back to the page now, to be sent as ordinary messages.
       if (turn.goalRun && isAttached()) {
@@ -734,14 +754,15 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       for (const f of frames.slice(-1)) emit(f);
       c.turn = null;
       // What a page that was away needs to show the end of this turn (attach, below).
-      c.last = { wake: !!adopt, taken: isAttached(), requestId, sessionId, mode: appliedMode, model: route.name, contextMax: route.contextWindow, remoteModel: route.kind === 'api', content: hideDeltas ? '' : written.all.slice(0, 4_000_000), reasoning: written.reasoning, cards: [...projector.tools.values()].filter(t => t.card).map(t => t.card), agents: [...turn.children.values()].map(child => child.cp.agent()), followUps: turn.followUps, terminal };
+      c.last = { wake: !!adopt, taken: isAttached(), requestId, sessionId, mode: appliedMode, model: route.name, contextMax: route.contextWindow, remoteModel: route.kind === 'api', content: hideDeltas ? '' : written.all.slice(0, 4_000_000), reasoning: written.reasoning, cards: [...projector.tools.values()].filter(t => t.card).map(t => t.card), agents: [...turn.children.values()].map(child => child.cp.agent()), followUps: turn.followUps, closingNotes: extra.filter(f => f.type === 'delta' && f.own).map(({ own, ...frame }) => frame), terminal };
       // every reply the agent started by itself that no page took is kept, not only the last one: two background commands that finish while the app is closed both reach the chat
       if (c.last.wake && !c.last.taken) c.woken = [...(c.woken ?? []).filter(w => !w.taken), c.last].slice(-WOKEN_KEPT);
       turn.ended.resolve({ reason: projector.ended, failure: failure ?? null });
       notifyIdle();
       if (!failure && !turn.stopping && !goal && !planTask && !researchTopic && rt === runtime) armWake(c, runtime, sessionId, turn.lastSeq);
-      // A turn that filled the context, or that the guard stopped, leaves a long history behind: summarise the older part now so the next message has room.
-      if (noteReason === 'context' || noteReason === 'searches' || noteReason === 'searches-failed' || noteReason === 'rewrites' || /context window|too long|exceeds/i.test(String(projector.ended?.error?.message ?? ''))) void compactSession(runtime, sessionId);
+      // The Harness recovers from actual context refusal, and the next prompt
+      // checks fit before it is sent. Avoid a second, unsolicited summary here.
+      if (noteReason === 'searches' || noteReason === 'searches-failed' || noteReason === 'rewrites') void compactSession(runtime, sessionId);
     }
 
     emit({ type: 'start', model: route.name, contextMax: route.contextWindow, demo: false, remoteModel: route.kind === 'api', agent: true, mode: appliedMode, sessionId, requestId, skills: [], ...(planTask ? { planning: true } : {}) });
@@ -798,8 +819,21 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       turn.lastActivity = Date.now();
       turn.heard = turn.lastActivity;
       for (const f of projector.consume(item)) emit(f);
-      if (guard && projector.contextTokens != null) trip(guard.context(projector.contextTokens));
-      if (item.type === 'event') watchParent(item.event);
+      if (item.type === 'event') {
+        const event = item.event;
+        if (event.type === 'assistant/message') {
+          const blocks = event.data?.message?.content ?? [];
+          finalAnswer = !hideDeltas && !blocks.some(block => block.type === 'tool-call')
+            && blocks.some(block => block.type === 'text' && block.text?.trim());
+        } else if (event.type === 'turn/start') finalAnswer = false;
+        turn.plan?.evidence?.observe(event);
+        watchParent(event);
+        const stalled = progress.observe(event);
+        // Waiting for a helper to report is legitimate work. Its own guard is independent.
+        if (stalled && ![...turn.children.values()].some(child => !child.done)) trip(stalled);
+      } else if (item.type === 'assistant-stream' && ![...turn.children.values()].some(child => !child.done)) {
+        trip(progress.observeStream(item.frame));
+      }
     }
 
     // -- helper agents ---------------------------------------------------------------------------------------
@@ -856,10 +890,10 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       const id = d.childId;
       if (!id || turn.children.has(id)) return;
       const cp = new ChildProjector({ id, name: d.label || 'Helper' });
-      const child = { id, cp, follow: null, noticed: false, done: false, lastRow: 0, rowPending: false, endedAt: 0, lastSeq: -1 };
+      const child = { id, cp, guard: new ProgressGuard(), follow: null, noticed: false, done: false, lastRow: 0, rowPending: false, endedAt: 0, lastSeq: -1 };
       turn.children.set(id, child);
       emitRow(child, true);
-      const fold = item => {
+      const fold = (item, replay = false) => {
         if (turn.finished) return;
         if (item.type === 'event' && Number.isInteger(item.event.seq)) {
           if (item.event.seq <= child.lastSeq) return;
@@ -875,7 +909,17 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           child.done = false;
           child.noticed = false;
           child.limitHit = false;
+          child.guard = new ProgressGuard();
           clearTimeout(turn.settleTimer);
+        }
+        if (!replay && !child.done && !child.stopTask && !turn.stopping) {
+          const reason = item.type === 'event' ? child.guard.observe(item.event)
+            : item.type === 'assistant-stream' ? child.guard.observeStream(item.frame) : null;
+          if (reason) {
+            cp.progressStop = GUARD_NOTES[reason];
+            log(`agent · helper guard: ${reason}`);
+            void turn.stopChild(child).catch(e => loseChild(child, e.message));
+          }
         }
         if (row) emitRow(child);
       };
@@ -883,7 +927,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
         request: { address: { kind: 'subagent', parentSessionId: sessionId, childSessionId: id, mode: d.mode ?? 'unknown' }, assistantStream: true },
       }, {
         onItem: item => {
-          if (item.type === 'snapshot') { for (const r of item.records ?? []) if (r.type === 'event') fold({ type: 'event', event: r.event }); return; }
+          if (item.type === 'snapshot') { for (const r of item.records ?? []) if (r.type === 'event') fold({ type: 'event', event: r.event }, true); return; }
           fold(item);
         },
         onEnd: () => loseChild(child, 'Lost contact with this helper.'),
@@ -935,6 +979,18 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
             turn.pendingSteers.delete(id);
             fix.texts.add(followUp.message.text);
             fix.since = Date.now();
+            if (turn.plan?.evidence) {
+              const evidence = turn.plan.evidence;
+              const changedCheck = evidence.correct(followUp.message.text);
+              const plan = plans.get(chatId);
+              const at = plan && currentStep(plan);
+              if (plan?.id === turn.plan.id && at >= 0) plans.update(chatId, p => {
+                const step = p.steps[at];
+                step.correction = followUp.message.text.slice(0, 600);
+                if (changedCheck) step.verificationDirection = step.correction;
+                step.verification = evidence.requirement;
+              });
+            }
             showFollowUp(followUp);
             if (!turn.parentOpen) armSettle();
           }
@@ -968,7 +1024,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
     function settlePlan(failure) {
       if (planTask) {
         if (failure || (turn.stopping && !turn.guard)) return [];
-        const parsed = parsePlan(written.all, planTask);
+        const parsed = parsePlan(written.all, planTask, planBrief);
         if (!parsed) return [];
         const plan = plans.create(chatId, { title: parsed.title, steps: parsed.steps, request: planTask, ...(turn.guard ? { caution: GUARD_NOTES[turn.guard] } : {}) });
         return [publishPlan('proposed', plan)];
@@ -996,7 +1052,9 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
     async function startStep(plan, index) {
       plans.update(chatId, p => { p.state = 'running'; p.goalStarted = true; p.steps[index].state = 'running'; });
       const now = plans.get(chatId);
-      await boundedRpc(runtime, 'goals/create', { agentId: sessionId, request: { objective: stepObjective(now, index) } });
+      if (planBrief) turn.plan.evidence = new StepEvidence(workspacePath, requirementOf(now.steps[index]));
+      const objective = stepObjective(now, index, planBrief);
+      await boundedRpc(runtime, 'goals/create', { agentId: sessionId, request: { objective } });
       if (turn.finished || turn.stopping) return;
       written.step = ''; written.stepAt = Date.now();
       emit(stepFrame(now, index));
@@ -1012,9 +1070,27 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       if (!run || !plan || plan.id !== run.id) return false;
       const at = currentStep(plan);
       if (at < 0) return false;
+      const evidence = run.evidence;
+      if (evidence?.requirement && !evidence.receipt) {
+        const message = evidence.requirement.invalid
+          ? 'This plan step still needs a valid read verification rule.'
+          : typeof evidence.requirement.line === 'string'
+            ? 'The plan step is paused until the required line is verified with Read.'
+            : 'The plan step is paused until the corrected file is verified with Read.';
+        emit({ type: 'delta', own: true, text: '\n\n' + message + '\n', key: message });
+        for (const frame of settlePlan(null)) emit(frame);
+        return false;
+      }
       const cards = [...projector.tools.values()].filter(x => x.calledAt >= (written.stepAt ?? 0) - 50 && x.card?.state === 'done').map(x => x.card);
-      const summary = stepSummary(cards, written.step.split(/\n\s*\n/).filter(Boolean).at(-1) ?? written.step);
-      plans.update(chatId, p => { p.steps[at].state = 'done'; p.steps[at].summary = summary; });
+      const summary = evidence?.receipt
+        ? 'Verified ' + evidence.receipt.path + (evidence.receipt.line === undefined ? ' with Read.' : ' at line ' + evidence.receipt.line + '.')
+        : stepSummary(cards, written.step.split(/\n\s*\n/).filter(Boolean).at(-1) ?? written.step);
+      plans.update(chatId, p => {
+        const step = p.steps[at];
+        step.state = 'done';
+        step.summary = summary;
+        if (evidence?.receipt) step.evidence = evidence.receipt;
+      });
       let now = plans.get(chatId);
       emit(stepFrame(now, at));
       emit({ type: 'delta', own: true, text: `\n\n${stepLine(at, now.steps.length, now.steps[at].text, 'done')}\n` });
@@ -1069,7 +1145,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           if (turn.pendingSteers.size) { armSettle(); return; }
           if (current && current.phase === 'active' && current.activation === 'armed') { turn.settleTimer = after(700, armSettle); return; }
           // TOOLCALL-B: the reply that ended the turn carried a tool call that could not run (an undeclared name, or markup cut off). The model
-          // gets a tool error and goes on, twice in a row at most; the third time the turn ends with one plain sentence. Nothing guessed runs.
+          // can retry within the turn's shared recovery budget. The bridge never runs a guessed tool call.
           if (fix.waiting) { turn.settleTimer = after(300, armSettle); return; }
           if (!turn.goalRun && !turn.stopping && projector.ended?.kind === 'completed') {
             const others = [...chats.values()].map(x => x.turn).filter(t => t && t !== turn && !t.finished && t.fix).map(t => ({ texts: t.fix.texts, since: t.fix.since }));
@@ -1078,13 +1154,13 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
             else if (got?.marker) {
               const m = got.marker;
               const what = [...(m.rejected ?? []).map(r => `rejected ${String(r?.name ?? '?').slice(0, 40)}`), ...(m.unread ? [`unread ${m.unread.reason ?? '?'}`] : [])].join(', ');
-              if (fix.count >= MAX_TOOL_FIXES) {
-                fix.ended = true;
-                log(`agent · ${chatId}: tool call could not run (${what}) after ${fix.count} corrections in a row; the turn ends`);
+              if (fix.count >= MAX_TOOL_FIXES || recoveryPrompts >= MAX_RECOVERY_PROMPTS) {
+                fix.ended = fix.count >= MAX_TOOL_FIXES && !projector.tools.size ? 'tool-calls' : 'recovery-limit';
+                log(`agent · ${chatId}: tool call could not run (${what}); recovery limit reached, ending the turn`);
                 finishTurn(null);
                 return;
               } else {
-                fix.count += 1; fix.total += 1;
+                fix.count += 1; recoveryPrompts += 1;
                 const text = correctionText(m);
                 log(`agent · ${chatId}: tool call could not run (${what}); correction ${fix.count} of ${MAX_TOOL_FIXES}`);
                 reporter.set({ phase: 'waiting', code: 'fixing-tool-call', text: FIXING_STATUS, key: FIXING_STATUS, values: [], urgent: true });
@@ -1098,9 +1174,12 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           }
           // A reply the length limit cut (AGENT-LOST): the agent lost what it was writing. Say so in the chat and ask it to carry on in smaller pieces, twice at most.
           if (turn.cutWaiting) { turn.settleTimer = after(300, armSettle); return; }
-          if (projector.ended?.kind === 'max-tokens' && !turn.goalRun && !turn.stopping && (turn.cuts ?? 0) < MAX_CUT_RETRIES) {
+          if (projector.ended?.kind === 'max-tokens' && !turn.goalRun && !turn.stopping && recoveryPrompts < MAX_RECOVERY_PROMPTS) {
             const cut = projector.cut();
-            turn.cuts = (turn.cuts ?? 0) + 1;
+            // A continuation can preserve an incomplete tool draft or visible answer.
+            // A reasoning-only cutoff has neither; resending at the same effort wastes another decode.
+            if (!cut.calls.length && !finalAnswer) { finishTurn(null); return; }
+            recoveryPrompts += 1;
             const note = cutNotice({ ...cut, retrying: true });
             emit({ type: 'delta', own: true, text: `
 
@@ -1141,7 +1220,9 @@ ${note.text}
             if (more && !turn.finished && !turn.stopping) { turn.settleTimer = after(700, armSettle); return; }
           }
 
-          if (turn.goalRun && current) { const line = goalEnding(current); if (line) emit({ type: 'delta', text: line }); }
+          if (turn.goalRun && current && (!turn.plan?.evidence?.requirement || turn.plan.evidence.receipt || current.phase !== 'complete')) {
+            const line = goalEnding(current); if (line) emit({ type: 'delta', text: line });
+          }
           if (turn.goalRun) await announceGoal(true);
         }
         finishTurn(null);
@@ -1173,13 +1254,13 @@ ${note.text}
         showFollowUp(entry);
       } catch (error) {
         // The session event can confirm delivery even if the HTTP acknowledgement was lost.
-        if (!turn.pendingSteers.delete(id)) return { ok: true };
+        if (!turn.pendingSteers.delete(id)) return { ok: true, message: entry.message };
         throw error;
       } finally {
         turn.steerAdmissions.delete(admission);
         if (!turn.parentOpen) armSettle();
       }
-      return { ok: true };
+      return { ok: true, message: entry.message };
     };
 
     const snapshotTimer = {};
@@ -1200,7 +1281,9 @@ ${note.text}
           turn.plan = { id: plan.id, once: !!planRun.once };
           const at = currentStep(plan);
           if (at < 0) throw new AgentUnavailable('Every step of this plan is already done.', 'plan-done');
-          if (goal.action === 'resume' && plan.goalStarted) {
+          const recheck = planBrief && goal.action === 'resume' && (await goalGet())?.phase === 'complete';
+          if (goal.action === 'resume' && plan.goalStarted && !recheck) {
+            if (planBrief) turn.plan.evidence = new StepEvidence(workspacePath, requirementOf(plan.steps[at]));
             plans.update(chatId, p => { p.state = 'running'; p.steps[at].state = 'running'; });
             await startGoal(runtime, sessionId, goal);
             emit(publishPlan('step', plans.get(chatId)));
@@ -1270,12 +1353,13 @@ ${note.text}
   /** The goal as the page and the goal bar see it (notes-split-agent3.md), or null. */
   function goalObject(view, chatId = null) {
     if (!view) return null;
-    const phase = ['active', 'paused', 'complete', 'blocked'].includes(view.phase) ? view.phase : 'blocked';
+    let phase = ['active', 'paused', 'complete', 'blocked'].includes(view.phase) ? view.phase : 'blocked';
     // A goal that is running a plan (or the points of a goal) shows the plan's title and which step it is on.
     const plan = chatId ? plans.get(chatId) : null;
     const running = plan && plan.goalStarted && ['running', 'paused'].includes(plan.state) ? plan : null;
     const at = running ? running.steps.findIndex(x => x.state !== 'done' && x.state !== 'skipped') : -1;
     const step = running && at >= 0 ? { index: at + 1, total: running.steps.length, text: running.steps[at].text } : null;
+    if (planBrief && running?.state === 'paused' && at >= 0 && phase === 'complete' && requirementOf(running.steps[at])) phase = 'paused';
     return { objective: step ? running.title : String(view.objective ?? ''), ...(step ? { step } : {}), phase, round: view.roundsStarted ?? 0, maxRounds: view.maxGoalRounds ?? null, ...(phase === 'blocked' ? { blocked: plainBlocker(view.blockedReason) } : {}) };
   }
 
@@ -1365,7 +1449,7 @@ ${note.text}
       return runTurn({ ...options, goal: { action: 'resume' }, ...(goalPlan ? { planRun: goalPlan } : {}) });
     }
     // A goal whose own words hold numbered points ("1. ... 2. ... 3. ...") runs point by point, each one reported.
-    const points = parsePoints(text);
+    const points = parsePoints(text, planBrief);
     if (points) {
       const plan = plans.create(chatId, { title: points.title, steps: points.steps, request: text, source: 'goal', state: 'approved' });
       onPlan(chatId, 'approved', planView(plan));
@@ -1409,7 +1493,7 @@ ${note.text}
         ? 'A plan is waiting for you above. Approve it, edit it or reject it, or type /plan followed by something else to make a new one.'
         : 'Type /plan followed by what you want done, for example: /plan build a small pagoda page. I will look around and write a plan; nothing changes until you approve it.');
     }
-    return runTurn({ ...options, message: planPrompt(task), planTask: task, mode: 'plan' });
+    return runTurn({ ...options, message: planPrompt(task, planBrief), planTask: task, mode: 'plan' });
   }
 
   /**
@@ -1442,7 +1526,7 @@ ${note.text}
     const plan = planOf(chatId, planId);
     if (action === 'edit') {
       mustBeOpen(plan);
-      const next = editedSteps(steps, plan.steps);
+      const next = editedSteps(steps, plan.steps, planBrief);
       const t = String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
       plans.update(chatId, p => { p.steps = next; if (t) p.title = t; p.state = 'proposed'; });
       onPlan(chatId, 'edited', planView(plans.get(chatId)));
@@ -1524,6 +1608,7 @@ ${note.text}
     if (!parent || !rt?.hp.running) throw new AgentUnavailable('The assistant is not running in this chat, so it cannot pass a message on. Send a message in the chat first.', 'helper-idle');
     try {
       const receipt = await rt.gw.rpc('subagents/prompt', { request: { requestId: `helper-${randomUUID()}`, parentSessionId: parent, childSessionId: String(helperId), mode: 'continuable', delivery: delivery === 'steer' ? 'steer' : 'queue', content: [{ type: 'text', text: clean }] } });
+      chats.get(chatId)?.turn?.children.get(String(helperId))?.guard.newInstruction();
       return { ok: true, messageId: receipt?.messageId ?? null, delivery: delivery === 'steer' ? 'steer' : 'queue' };
     } catch (e) {
       log(`agent · message for a helper refused: ${String(e?.message ?? e).slice(0, 200)}`);
@@ -1830,6 +1915,7 @@ ${note.text}
     for (const message of last.followUps ?? []) onFrame({ type: 'agent-follow-up', message });
     for (const card of last.cards) onFrame({ type: 'agent-tool', tool: card });
     for (const agent of last.agents ?? []) onFrame({ type: 'agent', agent });
+    for (const frame of last.closingNotes ?? []) onFrame(frame);
     if (last.terminal) onFrame(last.terminal);
     return { ended: Promise.resolve(), live: false };
   }

@@ -1,3 +1,5 @@
+import type { ChatMessage } from './types';
+
 /** What Enter does when the person sends a message while the assistant is still answering (#4783). The web chat page has the same three. */
 export type WhileBusy = 'wait' | 'queue' | 'interject';
 export const WHILE_BUSY: readonly WhileBusy[] = ['wait', 'queue', 'interject'];
@@ -20,4 +22,8 @@ export function busyPlan(mode: WhileBusy): BusyPlan {
  */
 export function parkedReady(viewed: string | null | undefined, active: string | null | undefined, streaming: boolean, parked: number): boolean {
   return !!viewed && viewed === active && !streaming && parked > 0;
+}
+
+export function isLiveFollowUp(message: Pick<ChatMessage, 'id' | 'role'>): boolean {
+  return message.role === 'user' && message.id.startsWith('steer-');
 }
