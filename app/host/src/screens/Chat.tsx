@@ -46,7 +46,7 @@ import { Btn, Icon, IconBtn, ErrorNotice, type IconName } from '../components/ui
 import { composerCap, scrollBehavior } from '../lib/responsive';
 import { relTime, cx, duration, tokens, tps } from '../lib/format';
 import { chosenRemote, hasModelToChat, showNoModelHint } from '../lib/composer-model';
-import { addQuote, clearQuotes, removeQuote, createSubagentExample, parkMessage, takeParked, pushToast, setPreviewTabClosed, setPreviewPanelClosed, branchFrom, continueLast, markRead, retryLast, selectSession, rewindTo, sendMessage, stopStreaming, useStore, } from '../lib/store';
+import { addQuote, clearQuotes, removeQuote, createSubagentExample, getState, parkMessage, takeParked, pushToast, setPreviewTabClosed, setPreviewPanelClosed, branchFrom, continueLast, markRead, retryLast, selectSession, rewindTo, sendMessage, steerMessage, stopStreaming, useStore, } from '../lib/store';
 import { CopyBtn, CopyMenuItem, MenuCloseContext } from '../components/CopyBtn';
 import { KEYS_UP, PILL_DISTANCE, distanceFromBottom, followAfterScroll, wheelLeavesBottom } from '../lib/follow-scroll';
 import { getSlashCommands } from '../lib/commands';
@@ -102,7 +102,7 @@ export function ChatScreen() {
         document.addEventListener('selectionchange', read);
         return () => document.removeEventListener('selectionchange', read);
     }, [session?.id]);
-    // Messages parked while an answer was written (Send after, Interrupt) go one by one, each when the chat is quiet again,
+    // Messages parked while an answer was written go one by one, each when the chat is quiet again,
     // and only from the chat that is also the active one: sendMessage sends to that one (#5806, parkedReady).
     useEffect(() => {
         if (!session || !parkedReady(session.id, activeId, streaming, parked?.length ?? 0))
@@ -112,6 +112,7 @@ export function ChatScreen() {
             void sendMessage(next);
     }, [streaming, parked?.length, session?.id, activeId]);
     const [draft, setDraft] = useState('');
+    const steering = useRef(new Set<string>());
     const draftKey = `strata.chat-draft.${session?.id ?? 'new'}`;
     useEffect(() => {
         setDraft(sessionStorage.getItem(draftKey) ?? '');
@@ -459,12 +460,22 @@ export function ChatScreen() {
                 return;
             const plan = busyPlan(whileBusy);
             const out = quotedMessage(quotes, text, numberQuotes);
-            // Interrupt: the answer stops where it is (what is written stays) and the message goes as soon as it has stopped (the effect below sends it).
-            if (plan === 'interrupt') {
-                updateDraft('');
-                clearQuotes(session.id);
-                parkMessage(session.id, out);
-                stopStreaming();
+            if (plan === 'steer') {
+                const id = session.id;
+                if (steering.current.has(id)) return;
+                steering.current.add(id);
+                // Pictures use the ordinary send path. Leave them attached for the parked message.
+                const sent = queuedPhotos.length ? Promise.resolve(false) : steerMessage(id, out);
+                void sent.then(delivered => {
+                    if (!delivered) parkMessage(id, out);
+                    if (sessionStorage.getItem(draftKey) === draft) {
+                        sessionStorage.removeItem(draftKey);
+                        if (getState().activeSession === id) setDraft('');
+                    }
+                    if (getState().quotes[id] === quotes) clearQuotes(id);
+                }, error => {
+                    pushToast('error', plainFailureText(error instanceof Error ? error.message : String(error)).message);
+                }).finally(() => steering.current.delete(id));
                 return;
             }
             updateDraft('');
@@ -713,10 +724,13 @@ function Composer({ draft, setDraft, loaded, streaming, onSubmit, onKey, session
         }}/>
           <div className="st-composer__bar">
             <ComposerControls draft={draft} onDraft={setDraft} session={session} onPreview={onPreview} streaming={streaming} onSlash={() => { setSlashDismissed(false); setSlashOpen(true); requestAnimationFrame(() => textareaRef.current?.focus()); }} onError={setFileError} onAttach={(name, text) => { setDraft(`${draft}${draft ? '\n\n' : ''}Attached ${name}\n\n${text}`); requestAnimationFrame(() => textareaRef.current?.focus()); }}/>
-            {tr(streaming ? (<Btn variant="secondary" size="sm" icon="stop" onClick={stopStreaming}>{tr("Stop")}</Btn>) : (<Btn variant="primary" size="sm" icon="send" disabled={(!draft.trim() && !photos.length) || draft.trim() === '/' || (!canChat && timeSkipPrompt(draft) === null)} onClick={onSubmit}>{tr("Send")}</Btn>))}
+            {streaming ? <>
+              {whileBusy !== 'wait' && !!draft.trim() && <Btn variant="primary" size="sm" icon="send" onClick={onSubmit}>{tr('Send')}</Btn>}
+              <Btn variant="secondary" size="sm" icon="stop" onClick={stopStreaming}>{tr('Stop')}</Btn>
+            </> : <Btn variant="primary" size="sm" icon="send" disabled={(!draft.trim() && !photos.length) || draft.trim() === '/' || (!canChat && timeSkipPrompt(draft) === null)} onClick={onSubmit}>{tr('Send')}</Btn>}
           </div>
         </div>
-        {tr(streaming && draft.trim() && whileBusy !== 'wait' ? <p className="xs muted composer__busy-hint" role="status">{tr(whileBusy === 'queue' ? "Enter sends it when the answer is done." : "Enter stops the answer here and sends it now.")}</p> : null)}
+        {tr(streaming && draft.trim() && whileBusy !== 'wait' ? <p className="xs muted composer__busy-hint" role="status">{tr(whileBusy === 'queue' ? "Enter sends it when the answer is done." : "Enter sends it at the next step, or after the answer if needed.")}</p> : null)}
         {tr(showNoModelHint({ streaming, canChat, hasText: !!draft.trim(), hasPhotos: photos.length > 0, bareSlash: draft.trim() === '/', isTimeSkip: timeSkipPrompt(draft) !== null }) ? <p className="xs muted composer__busy-hint" role="status">{tr("No model is loaded. Load one in Models to send this message.")}</p> : null)}
         <ChatTelemetry session={session}/>
         </div>
@@ -786,9 +800,10 @@ function MessageView({ message: m, isLast, onEditPrompt, onPreview, onClosePrevi
           card stays only for what needs the person: a question waiting, a denied or failed call. A card that came and went above the text moved the whole reply. */}
       {tr((m.tools ?? []).filter(t => !grouped || t.state === 'proposed' || t.state === 'denied' || t.state === 'error').map((t) => (<ToolCard key={t.id} tool={t}/>)))}
 
-      {tr(!(m.timeSkipId && timeSkipReal && !timeSkipDone) && (m.content || m.error || !m.streaming || !liveStatus || !!m.drafts?.length) ? <div className="st-bubble">
+      {tr(!(m.timeSkipId && timeSkipReal && !timeSkipDone) && (m.content || m.error || m.activity?.length || !m.streaming || !liveStatus || !!m.drafts?.length) ? <div className="st-bubble">
         {tr(planCard ? <PlanCard chatId={activeSession} planId={m.planId!}/> : null)}
         {tr(m.error ? (<ErrorNotice message={m.error} detail={m.errorDetail} {...contextRecovery(m.errorCode)}/>) : null)}
+        {tr(m.activity?.length ? <details className="activity-history" open={m.streaming}><summary>{tr('Work log')} · {tr(m.activity.length)}</summary><ol>{tr(m.activity.map((entry, i) => <li key={`${entry.at}-${i}`}>{tr(entry.text)}</li>))}</ol></details> : null)}
         {tr(grouped && !planCard && !m.timeSkipId ? m.blocks!.map((b, i) => b.kind === 'group' ? <ActivityLine key={b.id} group={b} sessionId={activeSession ?? ''} onPreview={onPreview}/> : <Markdown key={i} text={b.text} onOpenLink={onOpenLink} imageSession={activeSession} previewId={`${m.id}-b${i}`} onPreview={onPreview} onClosePreview={onClosePreview}/>) : null)}
         {tr(m.content && !planCard && !grouped ? (<Markdown text={m.timeSkipId && !timeSkipReal ? hostLive ? tr('This was a sample run made while the app could not reach its host.') : timeSkipDone ? tr('The result is ready. Switch between Original and Updated, or compare them side by side. This example uses sample outputs and simulated checks.') : tr('Revising the saved draft. Follow the result in the sidebar. This example uses sample outputs and simulated checks.') : m.content} onOpenLink={onOpenLink} imageSession={activeSession} previewId={m.id} onPreview={onPreview} onClosePreview={onClosePreview}/>) : !m.error && m.streaming && !liveStatus ? (<span className="typing" aria-label={tr("Generating")}>
             <i />
