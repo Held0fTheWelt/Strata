@@ -9,7 +9,7 @@ import { join, resolve, dirname, basename, sep, relative, isAbsolute } from 'nod
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
 import { draftingHint, NATIVE_FIELDS, APP_OWNED_FIELDS, withoutDraftLayer, resolveDrafter, validateNativeSettings, validateMcpServers, publicMcpServers, publicNativeEnv, restoreNativeEnv, speedSwitchRows } from './native-settings.mjs';
-import { resourceSettings, saferStart, reserveChoice } from './native-resources.mjs';
+import { resourceSettings, saferStart, reserveChoice, validRamReserve, withRamReserve } from './native-resources.mjs';
 import { USER_KEY, capture as captureUserArgs, merge as mergeUserArgs, setFlag as setUserFlag, stamped as stampedUserArgs } from './native-user-args.mjs';
 import { resolvePython, venvPython } from './python-resolver.mjs';
 import os from 'node:os';
@@ -72,6 +72,19 @@ export function createNativeControl({directory,requests=()=>[],changed=()=>{},sp
  mkdirSync(directory,{recursive:true});
  const settingsPath=join(directory,'native-host.json');
  let preferences=readJson(settingsPath,{repo:defaultRepo});
+ function ramReserve(){
+  const value=preferences.ramReserveGiB;
+  return {gib:validRamReserve(value)?value:null};
+ }
+ function saveRamReserve(gib){
+  if(gib!==null&&!validRamReserve(gib))throw new Error('Enter a whole number of GiB above zero, or choose Automatic.');
+  const next={...preferences,ramReserveGiB:gib};
+  const temp=settingsPath+'.ram-reserve-tmp';
+  writeFileSync(temp,JSON.stringify(next,null,2),{mode:0o600});
+  renameSync(temp,settingsPath);
+  preferences=next;
+  return ramReserve();
+ }
  let child=null,seq=0,buffer='',pending=new Map(),definitions=[],refreshing=null,lastRead=0,connecting=null;
  /* QAGUI 0213: until Control has answered once, the state says it is still being asked (`checking`), not that nothing is installed. A failed read during Control's start is read again after a few seconds instead of standing for 45 s; after READ_TRIES failures the answer is final and the error shows. */
  let everRead=false,failedReads=0;const READ_TRIES=4,RETRY_MS=3000;
@@ -369,7 +382,7 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   /* The agent asks for long answers (a thinking model can use most of the window): let the engine clamp the output to what is left of the context instead of refusing the request. */
   if(packaged&&cfg.fit_max_tokens===undefined)cfg.fit_max_tokens=true;
   if(parallelChoice){const applied=applyParallel(cfg,parallelChoice);for(const k of Object.keys(cfg))if(!(k in applied.cfg))delete cfg[k];Object.assign(cfg,applied.cfg);parallelNote=applied.note;}
-  return {cfg,resources,visionPreferences,parallelChoice,parallelNote};
+  return {cfg:withRamReserve(cfg,ramReserve().gib),resources,visionPreferences,parallelChoice,parallelNote};
  }
  /* One drafter per run. Control (strata_control/drafting.py) says which one this load runs and whether its file is on this computer: the plan of the saved model file with the choice the Load carries. */
  /* The engines this Load is about to unload (the load below unloads every instance unless it adds one beside them): their graphics memory is given back before the new engine starts, so Control must not count it as busy memory when it asks whether the all-cards split engine fits (`--engines-unloading`; the Terminal does the same, Runner.card_probe). A model added beside the others (`multiple`) keeps their memory busy. */
@@ -907,5 +920,5 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
  // Remove nonserializable process references from public jobs.
  const publicState=()=>{const value=state();value.jobs=value.jobs.map(({process,engineAbort,rawResult,...job})=>job);return value;};
  async function localPreview(path){if(!packaged)throw new Error('Checking local model files is part of the Strata app.');if(typeof path!=='string'||!path.trim()||[...path].some(c=>c.charCodeAt(0)<32))throw new Error('Choose a folder.');return control.importPlan(path.trim());}
- return {state:publicState,settingsHints,tuneStatus,tuneEffective,tuneOff,tunePresets:{list:()=>autotuner.list(),action:(kind,id,extra)=>autotuner.action(kind,id,extra),undoFor:async args=>autotuner.undoFor(tuneConfig(args).path)},refresh,localPreview,configure,setDownloadDirectory,planModelsFolder,startModelsFolder,interruptedMove,finishInterruptedMove,leaveInterruptedMove,plan,settings,save,settingsFile,openSettingsFile,operation,dismissRestart,cancel,unload,resolveInstance,poll,logs:()=>logs.slice(),benchmarkReport:()=>readJson(join(directory,'native-benchmark.json'),null),setDefault(id){defaultId=resolveInstance(id).id;emit();return publicState();},hasLive:()=>[...instances.values()].some(i=>i.status==='ready'),readyInstances:()=>[...instances.values()].filter(i=>i.status==='ready'),defaultInstanceId:()=>defaultId,close};
+ return {state:publicState,ramReserve,saveRamReserve,settingsHints,tuneStatus,tuneEffective,tuneOff,tunePresets:{list:()=>autotuner.list(),action:(kind,id,extra)=>autotuner.action(kind,id,extra),undoFor:async args=>autotuner.undoFor(tuneConfig(args).path)},refresh,localPreview,configure,setDownloadDirectory,planModelsFolder,startModelsFolder,interruptedMove,finishInterruptedMove,leaveInterruptedMove,plan,settings,save,settingsFile,openSettingsFile,operation,dismissRestart,cancel,unload,resolveInstance,poll,logs:()=>logs.slice(),benchmarkReport:()=>readJson(join(directory,'native-benchmark.json'),null),setDefault(id){defaultId=resolveInstance(id).id;emit();return publicState();},hasLive:()=>[...instances.values()].some(i=>i.status==='ready'),readyInstances:()=>[...instances.values()].filter(i=>i.status==='ready'),defaultInstanceId:()=>defaultId,close};
 }

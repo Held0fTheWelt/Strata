@@ -1095,6 +1095,8 @@ async function api(req, res, path, method, url) {
   if(path.startsWith('/api/native')){try{
   if(path==='/api/native'&&method==='GET')return json(res,200,await native.refresh(url.searchParams.get('refresh')==='1'));
   if(path==='/api/native'&&method==='PATCH')return json(res,200,await native.configure(await readBody(req)));
+  if(path==='/api/native/ram-reserve'&&method==='GET')return json(res,200,native.ramReserve());
+  if(path==='/api/native/ram-reserve'&&method==='POST')return json(res,200,native.saveRamReserve((await readBody(req))?.gib));
   if(path==='/api/native/directory'&&method==='POST')return json(res,200,native.setDownloadDirectory((await readBody(req)).directory));
   /* Settings > Storage > Models folder: pick (or type) a folder, say what it means, then start the choice. Copying is Control's (strata models move). */
   if(path==='/api/native/models-folder/plan'&&method==='POST'){
