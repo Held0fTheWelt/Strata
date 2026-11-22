@@ -5993,11 +5993,10 @@ class Service:
             print(f"[strata] tool calls inside the thinking: {parser.rescued} read as calls, {parser.refused} kept as "
                   f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
         if getattr(parser, "stray_think", 0):
-            # #4077 / #6120: the model wrote a closing think tag while thinking. #6120 keeps the text between that tag
-            # and the real closer as reasoning instead of sending it out as the answer.
+            # #4077: the model wrote a closing think tag while thinking; the reasoning after it was sent as the answer
             self.totals["stray_think_closers"] = self.totals.get("stray_think_closers", 0) + parser.stray_think
-            print(f"[strata] {parser.stray_think} extra closing think tag(s) were dropped (the model wrote one "
-                  "while thinking; what came between it and the real closer stayed reasoning)", flush=True)
+            print(f"[strata] {parser.stray_think} extra closing think tag(s) in the answer were dropped (the model wrote one "
+                  "while thinking, so the rest of its reasoning went out as the answer; a call after it still counts)", flush=True)
         if getattr(parser, "notes", None):
             self.totals["tool_args_repaired"] = self.totals.get("tool_args_repaired", 0) + len(parser.notes)
             print(f"[strata] {len(parser.notes)} tool call argument(s) repaired: {'; '.join(sorted(set(parser.notes)))}", flush=True)

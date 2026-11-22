@@ -1752,7 +1752,6 @@ def unwrap_arguments(args: dict, props: dict) -> bool:
 
 
 RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
-PROV_ANSWER = 240        # #6120: the text held after a `</think>` until it reads as the answer (see _provisional)
 
 
 class OutputParser:
@@ -1821,7 +1820,6 @@ class OutputParser:
         self.notes: list[str] = []   # #4427: what was repaired in the arguments of the calls (a damaged JSON array or object)
         self.after_think = False     # #4077: the reasoning ended at a bare `</think>` (a second one in the answer is a stray)
         self.stray_think = 0         # ... and the strays of that kind dropped from the answer
-        self.provisional = False     # #6120: right after a `</think>` its text is held until it reads as the answer
         self.refused = 0             # declared calls kept as reasoning text (quoted, or the turn was cut)
         self.fence, self.line, self.ticks = "", "", 0
         self._prev_blank = self._indented = False   # #4703: the line before was blank / this is inside an indented (4-space) code block
@@ -2123,29 +2121,6 @@ class OutputParser:
                 return k
             k = self.buf.find(THINK_END, k + 1)
         return -1
-
-    def _provisional(self, out: list[Event]) -> bool:
-        """#6120: the first `</think>` of a turn is not always the end of the thinking - a model writing about the
-        format puts a bare one on a line of its own and goes on thinking.  Nothing of the "answer" goes out until it
-        reads as one: a call after it or enough text.  A second `</think>` on a line of its own in what was held was
-        the real end, so the held text goes back as reasoning instead of leaking into the answer.  True keeps it held."""
-        i_call = self.buf.find(CALL_START)
-        i = self._stray_think_at()              # a `</think>` on a line of its own: the real end of the thinking
-        if 0 <= i <= PROV_ANSWER - len(THINK_END) and (i_call < 0 or i < i_call):
-            if i:                               # the first tag was prose about the format: the held text was reasoning
-                out.append(Event("reasoning", self._track(self.buf[:i])))
-            self.buf = self.buf[i + len(THINK_END):]
-            self.state, self.lead, self.after_think, self.provisional = "content", True, True, False
-            self._reset_track()                 # the answer starts at this tag
-            self.stray_think += 1               # the false closer, counted like #4077's
-            return False                        # what follows is the answer: the loop reads it, #4077's lead aside
-        if i_call >= 0 or (self.recover and self.schemas and self.buf.startswith(FUNC_START)):
-            self.provisional = False            # a call follows it: the answer really started (#5804 without its wrapper)
-            return False
-        if len(self.buf) >= PROV_ANSWER:
-            self.provisional = False            # long enough to read as an answer: it goes out as it always did
-            return False
-        return True
 
     def _release(self, deliver: bool) -> list[Event]:
         """Settle the calls waiting in self.pending: events for real calls, or all of it back as reasoning text."""
@@ -2652,7 +2627,6 @@ class OutputParser:
                     out.append(Event("reasoning", self._track(self.buf[:i])))
                 self.buf = self.buf[i + len(THINK_END):]
                 self.state, self.lead, self.after_think = "content", True, True
-                self.provisional = True                           # #6120: is this really the answer? see _provisional
                 self._reset_track()                               # the answer's own text starts here
             elif self.state == "content":
                 if self.lead:                                   # newlines right after </think> or a call
@@ -2661,10 +2635,6 @@ class OutputParser:
                         self.buf = ""
                         return out
                     self.buf, self.lead = stripped, False
-                if self.provisional:
-                    if self._provisional(out):
-                        return out                                  # #6120: nothing is said until this text reads as an answer
-                    continue                                        # it was reasoning, or it is the answer: go on with it
                 i = self.buf.find(CALL_START)
                 stray = self._stray_think_at() if self.after_think else -1
                 if stray >= 0 and (i < 0 or stray < i):
@@ -2951,10 +2921,6 @@ class OutputParser:
         self._restore_scan_body()               # #4686: the call body moved out while it streamed comes back first
         if self._held:
             self.buf, self._held = self.buf + self._held, ""
-        if self.provisional:                    # #6120: the turn ended while its first text after the tag was held
-            self.provisional = False
-            if self.state == "content" and self.buf:
-                out += self.feed("")            # it may still hold a call: read it the way every other answer is read
         if self.buf and self.state in ("call", "rcall", "invoke"):
             self._final = True                  # #4701: a call held after its closing tags (could a file's text go on?) is whole now
             out += self.feed("")
