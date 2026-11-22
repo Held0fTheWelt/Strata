@@ -44,4 +44,5 @@ def _open_append_windows(path: str, encoding: str):
     except OSError:
         kernel32.CloseHandle(handle)
         raise
-    return os.fdopen(fd, "a", encoding=encoding)
+    # Keep the pathname on the file object so readers open an independent handle.
+    return open(path, "a", encoding=encoding, opener=lambda _path, _flags: fd)

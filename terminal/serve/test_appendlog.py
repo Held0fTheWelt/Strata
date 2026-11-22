@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from serve import appendlog
+from serve.server_parts.engines import vision_log_tail
 
 
 def child(handle, text: str):
@@ -53,6 +54,13 @@ class SharedLog(unittest.TestCase):
         handle.write("nächste Zeile ✓\n")
         handle.close()
         self.assertEqual(self.log.read_text(encoding="utf-8").splitlines()[-1], "nächste Zeile ✓")
+
+    def test_reading_a_failed_child_log_preserves_the_handle_for_retry(self):
+        with appendlog.open_append(self.log) as log:
+            child(log, "GPU failed\n")
+            self.assertIn("GPU failed", vision_log_tail(log))
+            child(log, "CPU ready\n")
+        self.assertEqual(self.log.read_text(encoding="utf-8").splitlines()[-2:], ["GPU failed", "CPU ready"])
 
 
 class ServerUsesIt(unittest.TestCase):
