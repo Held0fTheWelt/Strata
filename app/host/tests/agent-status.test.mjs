@@ -1,7 +1,7 @@
 /** Live status of a running turn: the sentences, the throttling, and what the projector says as the model moves from thinking to writing a file. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { StatusReporter, toolStatusText, TokenCount } from '../server/agent/status.mjs';
+import { StatusReporter, toolStatusText, TokenCount, silentInterval } from '../server/agent/status.mjs';
 import { TurnProjector } from '../server/agent/events.mjs';
 
 test('a tool is described by what it does to what, in the person\'s words', () => {
@@ -62,6 +62,31 @@ test('status: clear says idle once and then nothing more is sent', () => {
   assert.deepEqual(frames.map(f => f.phase), ['tool', 'idle']);
   reporter.set({ phase: 'tool', code: 'tool', text: 'x' }); advance(5000);
   assert.equal(frames.length, 2);
+});
+
+test('status: a turn that says nothing new for 8 s still says that it is going (#6120)', () => {
+  const { reporter, frames, advance } = rig();
+  const same = { phase: 'tool', code: 'tool', text: 'Running a command…', args: { tool: 'pwsh' } };
+  reporter.set(same);
+  assert.equal(frames.length, 1);
+  advance(3000);
+  reporter.set(same);                       // the same words: nothing to say, but the work goes on
+  assert.equal(frames.length, 1, 'the same line is not sent twice');
+  advance(5000);                            // 8 s since the last frame
+  assert.equal(frames.length, 2, 'a beat went out');
+  assert.deepEqual([frames[1].text, frames[1].phase, frames[1].silent], ['Running a command… (8s)', 'tool', true]);
+  reporter.set(same);
+  advance(8000);
+  assert.equal(frames[2].text, 'Running a command… (16s)', 'the beat counts on');
+  reporter.clear();
+  advance(9000);
+  assert.equal(frames.filter(f => f.silent).length, 2, 'a turn that ended beats no more');
+});
+
+test('status: the silent beat takes STRATA_STATUS_SILENT_MS; anything silly is 8 s', () => {
+  assert.equal(silentInterval({}), 8000);
+  assert.equal(silentInterval({ STRATA_STATUS_SILENT_MS: '1500' }), 1500);
+  for (const bad of ['0', '-5', 'abc', '900', '90000', 'NaN']) assert.equal(silentInterval({ STRATA_STATUS_SILENT_MS: bad }), 8000, bad);
 });
 
 test('projector: thinking counts tokens; composing a file call is "Writing pagoda.html…" while no text arrives; running, result and next step follow', () => {

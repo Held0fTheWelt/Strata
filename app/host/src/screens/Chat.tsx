@@ -23,7 +23,7 @@ import { useChatPhotos, removeChatPhoto } from '../lib/chat-photos';
 import { useNative } from '../lib/native';
 import { COMPACT_FILES_FROM, mainResult, previewOf } from '../lib/deliverables';
 import { noModelNotice } from '../lib/no-model';
-import { ReasoningBlock } from '../components/ReasoningBlock';
+import { ReasoningBlock, ReasoningSegment } from '../components/ReasoningBlock';
 import { StatusLine } from '../components/StatusLine';
 import { GoalBar } from '../components/GoalBar';
 import { PlanCard, PlanPanel, QueuedMessages } from '../components/PlanCard';
@@ -782,8 +782,8 @@ function MessageView({ message: m, isLast, onEditPrompt, onPreview, onClosePrevi
     // A reply that proposed a plan shows the plan card in place of its closing text (which is the plan in prose).
     const storedPlan = usePlanQuiet(m.planId ? activeSession : null);
     const planCard = !!m.planId && storedPlan?.id === m.planId;
-    // A reply with activity lines is drawn piece by piece in the order it came; one without is the plain text it always was.
-    const grouped = !!m.blocks?.some(b => b.kind === 'group');
+    // A reply with activity lines or thinking pieces is drawn piece by piece in the order it came; one without is the plain text it always was.
+    const grouped = !!m.blocks?.some(b => b.kind === 'group' || b.kind === 'reasoning');
     const [sentTime, setSentTime] = useState(() => relTime(m.at));
     const sentQuote = m.role === 'user' ? parseQuoted(m.content) : null;
     // #5993: which of this message's numbered quotes still have their source message in the chat ('1' / '0' each; '' when it has none), so a deleted source shows its label without the jump
@@ -807,18 +807,22 @@ function MessageView({ message: m, isLast, onEditPrompt, onPreview, onClosePrevi
       </div>);
     }
     return (<div className="st-msg st-msg--assistant" data-message-id={m.id} data-error={m.error ? 'true' : undefined}>
-      {tr(m.reasoning ? <ReasoningBlock message={m}/> : null)}
+      {/* The thinking sits inside the reply, where it happened (#6120). Only a reply with no thinking piece of its own - an older chat, a taken-over turn - gets the one block above. */}
+      {tr(m.reasoning && !m.blocks?.some(b => b.kind === 'reasoning') ? <ReasoningBlock message={m}/> : null)}
 
 
       {/* In a reply with activity lines the line is the one live cue for a running or finished tool (and the status line below says what it is doing now); the
           card stays only for what needs the person: a question waiting, a denied or failed call. A card that came and went above the text moved the whole reply. */}
       {tr((m.tools ?? []).filter(t => !grouped || t.state === 'proposed' || t.state === 'denied' || t.state === 'error').map((t) => (<ToolCard key={t.id} tool={t}/>)))}
 
-      {tr(!(m.timeSkipId && timeSkipReal && !timeSkipDone) && (m.content || m.error || m.activity?.length || !m.streaming || !liveStatus || !!m.drafts?.length) ? <div className="st-bubble">
+      {tr(!(m.timeSkipId && timeSkipReal && !timeSkipDone) && (m.content || m.error || m.activity?.length || !!m.blocks?.length || !m.streaming || !liveStatus || !!m.drafts?.length) ? <div className="st-bubble">
         {tr(planCard ? <PlanCard chatId={activeSession} planId={m.planId!}/> : null)}
         {tr(m.error ? (<ErrorNotice message={m.error} detail={m.errorDetail} {...contextRecovery(m.errorCode)}/>) : null)}
         {tr(m.activity?.length ? <details className="activity-history" open={m.streaming}><summary>{tr('Work log')} · {tr(m.activity.length)}</summary><ol>{tr(m.activity.map((entry, i) => <li key={`${entry.at}-${i}`}>{tr(entry.text)}</li>))}</ol></details> : null)}
-        {tr(grouped && !planCard && !m.timeSkipId ? m.blocks!.map((b, i) => b.kind === 'group' ? <ActivityLine key={b.id} group={b} sessionId={activeSession ?? ''} onPreview={onPreview}/> : <Markdown key={i} text={b.text} onOpenLink={onOpenLink} imageSession={activeSession} previewId={`${m.id}-b${i}`} onPreview={onPreview} onClosePreview={onClosePreview}/>) : null)}
+        {tr(grouped && !planCard && !m.timeSkipId ? m.blocks!.map((b, i) => b.kind === 'group' ? <ActivityLine key={b.id} group={b} sessionId={activeSession ?? ''} onPreview={onPreview}/> : b.kind === 'reasoning'
+          // a thinking piece draws where it came; an empty one only while it is the stretch the model is in right now
+          ? (b.text || (m.streaming && isLast && i === m.blocks!.length - 1) ? <ReasoningSegment key={`rz${i}`} text={b.text} live={!!(m.streaming && isLast && i === m.blocks!.length - 1)}/> : null)
+          : <Markdown key={i} text={b.text} onOpenLink={onOpenLink} imageSession={activeSession} previewId={`${m.id}-b${i}`} onPreview={onPreview} onClosePreview={onClosePreview}/>) : null)}
         {tr(m.content && !planCard && !grouped ? (<Markdown text={m.timeSkipId && !timeSkipReal ? hostLive ? tr('This was a sample run made while the app could not reach its host.') : timeSkipDone ? tr('The result is ready. Switch between Original and Updated, or compare them side by side. This example uses sample outputs and simulated checks.') : tr('Revising the saved draft. Follow the result in the sidebar. This example uses sample outputs and simulated checks.') : m.content} onOpenLink={onOpenLink} imageSession={activeSession} previewId={m.id} onPreview={onPreview} onClosePreview={onClosePreview}/>) : !m.error && m.streaming && !liveStatus ? (<span className="typing" aria-label={tr("Generating")}>
             <i />
             <i />

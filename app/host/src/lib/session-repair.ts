@@ -18,6 +18,8 @@ export function repairSession(session: Session): Session {
     const fixed: Record<string, unknown> = { ...m, id: typeof m.id === 'string' ? m.id : `m${i}`, role: typeof m.role === 'string' ? m.role : 'assistant', content: text(m.content), at: text(m.at) };
     if (m.model !== undefined && typeof m.model !== 'string') delete fixed.model;
     if (m.reasoning !== undefined && typeof m.reasoning !== 'string') delete fixed.reasoning;
+    // The reply's pieces (#6120): text, activity line or a stretch of thinking. Anything else would be drawn as text it does not have.
+    if (Array.isArray(m.blocks)) fixed.blocks = m.blocks.filter(b => isObject(b) && ((b.kind === 'text' || b.kind === 'reasoning') && typeof b.text === 'string' || (b.kind === 'group' && typeof b.id === 'string')));
     return fixed;
   }) as unknown as Session['messages'];
   return {

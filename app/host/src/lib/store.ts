@@ -16,7 +16,7 @@ import { applyStatusFrame, clearStatus } from './live-status';
 import { approvalNeeded, questionAsked, workFinished } from './attention';
 import { applyGoalFrame } from './goal';
 import { tidyAnswer } from './answer-text';
-import { appendText, mergeDeliverable, readDeliverable, readGroup, readSkills, upsertGroup } from './deliverables';
+import { appendReasoning, appendText, mergeDeliverable, readDeliverable, readGroup, readSkills, upsertGroup } from './deliverables';
 import { applyPlanFrame, applyQueueFrame, planApprove, queueMessage } from './plan';
 import { forkFields, isForkJob, TIME_SKIP_DURATION, timeSkipPrompt, timeSkipTabId, withTimeSkipResult, type TimeSkipFile, type TimeSkipJob, type TimeSkipRun, type TimeSkipVersion } from './time-skip';
 import { PREVIEW_EXAMPLES, type PreviewArtifact } from './artifacts';
@@ -2226,7 +2226,7 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
      apply what is waiting first, so the order the person sees is the order it was written. */
   const waiting: ['reasoning' | 'delta', string][] = [];
   let waitingTimer: ReturnType<typeof setTimeout> | null = null;
-  const applyReasoning = (text: string) => patchAssistant((m) => ({ ...m, reasoning: (m.reasoning ?? '') + text, reasoningStartedAt: m.reasoningStartedAt ?? Date.now() }));
+  const applyReasoning = (text: string) => patchAssistant((m) => ({ ...m, reasoning: (m.reasoning ?? '') + text, reasoningStartedAt: m.reasoningStartedAt ?? Date.now(), blocks: appendReasoning(m.blocks ?? (m.content ? appendText(undefined, m.content) : undefined), text) }));
   const applyDelta = (text: string) => patchAssistant((m) => { const content=tidyAnswer(m.content+text); if (m.reasoningStartedAt && m.reasoningMs === undefined) m = { ...m, reasoningMs: Date.now() - m.reasoningStartedAt }; const count=Math.max(1,Math.ceil((content.length+(m.reasoning?.length??0))/4)); return {...m,content,...(m.blocks?{blocks:appendText(m.blocks,text)}:{}),tokens:m.usageSource==='estimated'&&m.tps?m.tokens:count,inputTokens:m.inputTokens??Math.ceil((body.length+prior.reduce((n,p)=>n+p.content.length,0))/4),usageSource:'estimated'}; });
   const flushWaiting = () => {
     if (waitingTimer !== null) { clearTimeout(waitingTimer); waitingTimer = null; }
@@ -2284,11 +2284,19 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
           patchAssistant(m => {
             let next = m;
             if (said) next = said.startsWith(next.content) ? { ...next, content: tidyAnswer(said), ...(next.blocks && said.length > next.content.length ? { blocks: appendText(next.blocks, said.slice(next.content.length)) } : {}) } : { ...next, content: tidyAnswer(said), blocks: undefined };
-            if (thought && thought.length >= (next.reasoning ?? '').length) next = { ...next, reasoning: thought, reasoningStartedAt: next.reasoningStartedAt ?? Date.now() };
+            if (thought && thought.length >= (next.reasoning ?? '').length) {
+              // The page missed where the thinking sat: put it back in the flow, the answer after it when the flow is empty.
+              const blocks = next.blocks?.some(b => b.kind === 'reasoning') ? next.blocks
+                : next.blocks ? appendReasoning(next.blocks, thought)
+                : [...appendReasoning(undefined, thought), ...(next.content ? appendText(undefined, next.content) : [])];
+              next = { ...next, reasoning: thought, reasoningStartedAt: next.reasoningStartedAt ?? Date.now(), blocks };
+            }
             return next;
           });
         } else if (type === 'status') {
           applyStatusFrame(sessionId, frame as Record<string, unknown>);
+          // Thinking opens where it happens: the row is in the reply before the first piece of reasoning arrives.
+          if (frame.phase === 'thinking') patchAssistant(m => (m.blocks?.at(-1)?.kind === 'reasoning' ? m : { ...m, blocks: appendReasoning(m.blocks ?? (m.content ? appendText(undefined, m.content) : undefined), '') }));
           // The banner is only the current state. Keep each meaningful change on
           // the reply too, so a quiet non-thinking turn is still inspectable.
           const text = typeof frame.text === 'string' ? frame.text.trim() : '';

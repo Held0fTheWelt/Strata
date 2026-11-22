@@ -5,6 +5,9 @@
  * new frame on every change of phase or target (at most one per `gapMs`, the newest change wins), and between changes only repeats the
  * frame to refresh a counter (reasoning tokens, bytes written) every `beatMs`. It never sends the same words twice in a row.
  *
+ * A turn that changes nothing at all (`silentMs`, 8 s by default) still gets one beat frame with the time it has been going
+ * (#6120): a long command, a big file write and a waiting approval are otherwise silent, and the person reads the chat as stuck.
+ *
  *   { type:'status', seq, phase, code, text, key?, values?, args?, tokens?, elapsedMs }
  *   `key`/`values` (only when the sentence has a name or a number in it): the catalog template ("Writing {0}…") and its values, for translation.
  *
@@ -65,18 +68,28 @@ export function toolUpdate(phase, code, name, args, options, extra = {}) {
 const COUNTERS = new Set(['tokens', 'bytes']);
 const keyOf = u => `${u.phase}|${u.code}|${JSON.stringify(Object.fromEntries(Object.entries(u.args ?? {}).filter(([k]) => !COUNTERS.has(k))))}`;
 
+/** "12s", "1m 04s" for the beat of a turn that says nothing new (#6120): the page's work log needs a line that changes. */
+const fmtSeconds = s => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+
+/** The silent beat's interval; a tester may shorten it (STRATA_STATUS_SILENT_MS, 1 s … 60 s). */
+export function silentInterval(env = process.env, fallback = 8000) {
+  const n = Number(env.STRATA_STATUS_SILENT_MS);
+  return Number.isFinite(n) && n >= 1000 && n <= 60_000 ? n : fallback;
+}
+
 export class StatusReporter {
   /**
-   * @param {{emit: (frame: object) => void, now?: () => number, gapMs?: number, beatMs?: number, timers?: {set: Function, clear: Function}}} options
+   * @param {{emit: (frame: object) => void, now?: () => number, gapMs?: number, beatMs?: number, silentMs?: number, timers?: {set: Function, clear: Function}}} options
    */
-  constructor({ emit, now = Date.now, gapMs = 300, beatMs = 2000, timers = { set: setTimeout, clear: clearTimeout } }) {
-    Object.assign(this, { emitFrame: emit, now, gapMs, beatMs, timers });
+  constructor({ emit, now = Date.now, gapMs = 300, beatMs = 2000, silentMs = silentInterval(), timers = { set: setTimeout, clear: clearTimeout } }) {
+    Object.assign(this, { emitFrame: emit, now, gapMs, beatMs, silentMs, timers });
     this.seq = 0;
     this.current = null;      // what the page was last told
     this.wanted = null;       // the newest thing that is true now
     this.phaseStartedAt = 0;
     this.lastEmitAt = -Infinity;
     this.timer = null;
+    this.silentTimer = null;
     this.closed = false;
   }
 
@@ -92,6 +105,7 @@ export class StatusReporter {
     // a goal step, and a rare line marked `urgent` (the model is asked to fix its tool call), are always heard at once
     if (!this.current || sinceEmit >= due || update.phase === 'goal' || update.urgent === true) this.#flush();
     else if (this.#differs()) this.#arm(due - sinceEmit);
+    if (this.silentMs > 0) this.#armSilent();     // #6120: even a turn with nothing new says it is still going
   }
 
   /** Nothing is happening any more: tell the page to drop the line. */
@@ -101,7 +115,13 @@ export class StatusReporter {
     this.dispose();
   }
 
-  dispose() { this.closed = true; if (this.timer) this.timers.clear(this.timer); this.timer = null; }
+  dispose() {
+    this.closed = true;
+    if (this.timer) this.timers.clear(this.timer);
+    this.timer = null;
+    if (this.silentTimer) this.timers.clear(this.silentTimer);
+    this.silentTimer = null;
+  }
 
   #differs() {
     const a = this.wanted, b = this.current;
@@ -114,8 +134,29 @@ export class StatusReporter {
     this.timer.unref?.();
   }
 
+  /** A turn that says nothing for `silentMs` still says that it is going: one beat line with the time it has taken so far. */
+  #armSilent() {
+    if (this.silentTimer || this.closed || !this.current || this.current.phase === 'idle') return;
+    const wait = Math.max(0, this.silentMs - (this.now() - this.lastEmitAt));
+    this.silentTimer = this.timers.set(() => {
+      this.silentTimer = null;
+      const c = this.current;
+      if (this.closed || !c || c.phase === 'idle') return;
+      const secs = Math.round((this.now() - this.phaseStartedAt) / 1000);
+      this.lastEmitAt = this.now();
+      this.emitFrame({
+        type: 'status', seq: ++this.seq, phase: c.phase, code: c.code, text: `${c.text} (${fmtSeconds(secs)})`,
+        silent: true,
+        ...(c.args ? { args: c.args } : {}), ...(c.tokens !== undefined ? { tokens: c.tokens } : {}),
+        elapsedMs: this.now() - this.phaseStartedAt,
+      });
+    }, wait);
+    this.silentTimer.unref?.();
+  }
+
   #flush() {
     if (this.timer) { this.timers.clear(this.timer); this.timer = null; }
+    if (this.silentTimer) { this.timers.clear(this.silentTimer); this.silentTimer = null; }
     const w = this.wanted;
     if (!w || (this.current && this.current.text === w.text && this.current.phase === w.phase && this.current.tokens === w.tokens)) return;
     this.current = w;

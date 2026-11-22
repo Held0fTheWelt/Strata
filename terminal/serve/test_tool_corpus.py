@@ -105,17 +105,19 @@ add("4701-two-calls-with-text-between", qwen("read", path="a.txt") + "\n\nAnd th
 add("4077-stray-think-line", "The user wants a file with a literal.\n" + STRAY_VALUE + "\nSo I write it.\n</think>\n\n" +
     qwen("write_file", path="out.txt", content=STRAY_VALUE),
     [("write_file", {"path": "out.txt", "content": STRAY_VALUE})], thinking=True,
-    reasoning="The user wants a file with a literal.\nreasoning sample:\n",
-    content="answer sample\nSo I write it.", source="#4077 Tsury: the model quoted the closing tag at a line start")
+    reasoning="The user wants a file with a literal.\nreasoning sample:\nanswer sample\nSo I write it.",
+    source="#4077 Tsury, read through #6120: the tag at a line start was prose about the format, so what came between "
+           "it and the real closer stays reasoning instead of going out as the answer")
 add("4077-stray-think-in-a-fence", "Content:\n```\n" + STRAY_VALUE + "\n```\nNow call it.\n</think>\n\n" +
     qwen("write_file", path="out.txt", content=STRAY_VALUE),
     [("write_file", {"path": "out.txt", "content": STRAY_VALUE})], thinking=True,
-    reasoning="Content:\n```\nreasoning sample:\n", content="answer sample\n```\nNow call it.",
-    source="#4077: the quote sat in a code fence, so the fence closes in the 'answer'")
+    reasoning="Content:\n```\nreasoning sample:\nanswer sample\n```\nNow call it.",
+    source="#4077 + #6120: the fence stays inside the thinking; the answer is the call")
 add("4077-stray-think-after-a-backtick", "The text is `" + STRAY_VALUE + "`. Call it.\n</think>\n\n" +
     qwen("write_file", path="out.txt", content=STRAY_VALUE),
     [("write_file", {"path": "out.txt", "content": STRAY_VALUE})], thinking=True,
-    reasoning="The text is `reasoning sample:\n", content="answer sample`. Call it.", source="#4077: an open backtick")
+    reasoning="The text is `reasoning sample:\nanswer sample`. Call it.",
+    source="#4077 + #6120: the open backtick stays inside the thinking; the answer is the call")
 add("4077-quoted-think-stays-reasoning", "I will not write `</think>` yet, I keep thinking.\nDone thinking.\n</think>\n\nThe answer.",
     thinking=True, reasoning="I will not write `</think>` yet, I keep thinking.\nDone thinking.\n", content="The answer.",
     source="#537: a closing tag after a backtick is still reasoning (control)")
@@ -124,6 +126,15 @@ add("4077-closer-in-the-answer-text-is-kept-mid-line", "Reasoning.\n</think>\n\n
     source="a closing tag inside a sentence of the answer is text (control)")
 add("4077-no-second-closer-is-the-normal-case", "Reasoning.\n</think>\n\n" + qwen("read", path="a.txt"),
     [("read", {"path": "a.txt"})], thinking=True, reasoning="Reasoning.\n", source="control")
+add("6120-false-closer-mid-thinking-stays-reasoning",
+    "I must write the format down.\n</think>\nThe closer goes on its own line, so this is still thinking.\n</think>\n\nThe answer.",
+    thinking=True, reasoning="I must write the format down.\nThe closer goes on its own line, so this is still thinking.\n",
+    content="The answer.", source="#6120: a bare </think> written while thinking ends nothing")
+add("6120-false-closer-then-a-call",
+    "I must write the format down.\n</think>\nThe closer goes on its own line.\n</think>\n\n" + qwen("read", path="a.txt"),
+    [("read", {"path": "a.txt"})], thinking=True,
+    reasoning="I must write the format down.\nThe closer goes on its own line.\n",
+    source="#6120: the turn still runs its call after the real closer")
 
 # ---- the Qwen3.8-Flash-Next form and its slips ------------------------------------------------------------------
 add("qwen-one-call", "I will read it.\n\n" + qwen("read", path="a.txt"), [("read", {"path": "a.txt"})],

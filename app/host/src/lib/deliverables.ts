@@ -17,7 +17,7 @@ export interface GroupLive { label?: string; output?: string;
   /** A file being written right now (from `message.drafts`): characters so far, lines so far and the last lines of the text. */
   bytes?: number; lines?: number; tail?: string }
 export interface ActivityGroup { id: string; closed: boolean; line: string; added: number; removed: number; files: GroupFile[]; live?: GroupLive }
-export type MessageBlock = { kind: 'text'; text: string } | ({ kind: 'group' } & ActivityGroup);
+export type MessageBlock = { kind: 'text'; text: string } | ({ kind: 'group' } & ActivityGroup) | { kind: 'reasoning'; text: string };
 
 const KINDS = ['html', 'markdown', 'pdf', 'csv', 'image', 'code', 'text', 'other'];
 const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -69,6 +69,14 @@ export function upsertGroup(blocks: MessageBlock[] | undefined, group: ActivityG
   const list = blocks ?? [], at = list.findIndex(b => b.kind === 'group' && b.id === group.id);
   const next: MessageBlock = { kind: 'group', ...group };
   return at >= 0 ? list.map((b, i) => (i === at ? next : b)) : [...list, next];
+}
+
+/** The model's thinking as a piece of the reply, in the order it came: it goes on in the thinking piece it follows, or opens a new one
+ *  after the answer or the activity line it came behind. `text` may be empty: that is a stretch that has started but said nothing yet. */
+export function appendReasoning(blocks: MessageBlock[] | undefined, text: string): MessageBlock[] {
+  const list = blocks ?? [], last = list.at(-1);
+  if (last?.kind === 'reasoning') return [...list.slice(0, -1), { kind: 'reasoning', text: last.text + text }];
+  return [...list, { kind: 'reasoning', text }];
 }
 
 /** The same file may be written more than once in a run: one card per path, with its latest numbers. */

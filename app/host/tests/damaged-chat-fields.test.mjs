@@ -67,6 +67,14 @@ test('a chat read from a saved file is repaired: every text field a list reads i
   assert.equal(repairSession(odd).updatedAt, odd.updatedAt, 'repairing twice changes nothing');
 });
 
+test("a reply's pieces survive repair; a piece that is neither text, activity nor thinking is dropped (#6120)", () => {
+  const s = repairSession({ id: 'x', title: 'x', createdAt: '2026-10-10T10:00:00.000Z', updatedAt: '2026-10-10T10:00:00.000Z', workspace: 'C:\\Work', messages: [{
+    id: 'm', role: 'assistant', content: 'Done.', at: '2026-10-10T10:00:00.000Z', reasoning: 'Thought.',
+    blocks: [{ kind: 'reasoning', text: 'Thought. ' }, { kind: 'group', id: 'g1', line: 'Ran a command' }, { kind: 'text', text: 'Done.' }, { kind: 'text' }, { kind: 'other', text: 'x' }, null],
+  }] });
+  assert.deepEqual(s.messages[0].blocks.map(b => b.kind), ['reasoning', 'group', 'text'], 'the good pieces stay in the order they came');
+});
+
 test('no usable date shows no time instead of "NaNm"', () => {
   assert.equal(relTimeShort(''), '');
   assert.equal(relTimeShort(undefined), '');
