@@ -3,17 +3,26 @@ import assert from 'node:assert/strict';
 import { createEngineStep } from '../server/engine-step.mjs';
 
 const GB = 1e9;
-function control({ usable = false, check, update, checkError = null } = {}) {
+function control({ usable = false, pinned = null, check, update, checkError = null } = {}) {
   const calls = [];
   return {
     calls,
-    async engine() { calls.push('engine'); return { usable }; },
+    async engine() { calls.push('engine'); return { usable, pinned }; },
     async updateCheck() { calls.push('updateCheck'); if (checkError) throw new Error(checkError); return check; },
     async update(options) { calls.push(['update', options.engine, options.control]); return update(options); },
   };
 }
 const offer = (status = 'install', extra = {}) => ({ engine: { status, installed: null, offered: { version: '0.1.46' }, download_bytes: 0.5 * GB, ...extra } });
 const updated = { ok: true, results: [{ component: 'engine', status: 'updated', installed_after: { version: '0.1.46' } }] };
+
+test('a model download keeps a usable pinned engine without querying the update feed', async () => {
+  const c = control({ usable: true, pinned: '0.1.62.1-windows-x86_64-hip-rx9070-cache' });
+  const step = createEngineStep({ control: c });
+  const part = await step.run();
+  assert.equal(part.state, 'current');
+  assert.equal(step.summaryNote(), null);
+  assert.deepEqual(c.calls, ['engine']);
+});
 
 test('no engine installed: the step downloads it with the model and reports the stages in order', async () => {
   const seen = [];

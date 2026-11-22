@@ -20,6 +20,7 @@ export function repairSession(session: Session): Session {
     if (m.reasoning !== undefined && typeof m.reasoning !== 'string') delete fixed.reasoning;
     // The reply's pieces (#6120): text, activity line or a stretch of thinking. Anything else would be drawn as text it does not have.
     if (Array.isArray(m.blocks)) fixed.blocks = m.blocks.filter(b => isObject(b) && ((b.kind === 'text' || b.kind === 'reasoning') && typeof b.text === 'string' || (b.kind === 'group' && typeof b.id === 'string')));
+    else delete fixed.blocks;
     return fixed;
   }) as unknown as Session['messages'];
   return {

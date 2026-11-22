@@ -135,6 +135,10 @@ add("6120-false-closer-then-a-call",
     [("read", {"path": "a.txt"})], thinking=True,
     reasoning="I must write the format down.\nThe closer goes on its own line.\n",
     source="#6120: the turn still runs its call after the real closer")
+add("6120-closer-past-answer-lookahead",
+    "Reasoning.\n</think>\n" + "The answer continues. " * 15 + "\n</think>\nFinished.",
+    thinking=True, reasoning="Reasoning.\n", content=("The answer continues. " * 15 + "\nFinished.").strip(),
+    source="#6120: the lookahead gives the same answer for large and small stream chunks")
 
 # ---- the Qwen3.8-Flash-Next form and its slips ------------------------------------------------------------------
 add("qwen-one-call", "I will read it.\n\n" + qwen("read", path="a.txt"), [("read", {"path": "a.txt"})],

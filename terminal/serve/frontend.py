@@ -2131,7 +2131,7 @@ class OutputParser:
         the real end, so the held text goes back as reasoning instead of leaking into the answer.  True keeps it held."""
         i_call = self.buf.find(CALL_START)
         i = self._stray_think_at()              # a `</think>` on a line of its own: the real end of the thinking
-        if i >= 0 and (i_call < 0 or i < i_call):
+        if 0 <= i <= PROV_ANSWER - len(THINK_END) and (i_call < 0 or i < i_call):
             if i:                               # the first tag was prose about the format: the held text was reasoning
                 out.append(Event("reasoning", self._track(self.buf[:i])))
             self.buf = self.buf[i + len(THINK_END):]

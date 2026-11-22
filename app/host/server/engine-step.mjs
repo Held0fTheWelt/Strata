@@ -2,7 +2,7 @@
  * The engine comes with the model.
  *
  * A model install job (packaged app) also makes sure this PC has a usable engine: if none is installed, or the signed feed offers
- * a newer compatible one, the job runs Control's component updater for the engine (same feed, signature and hash checks, staged
+ * a newer compatible one for an unpinned engine, the job runs Control's component updater (same feed, signature and hash checks, staged
  * test start) next to the model files. It reports through the job's own progress fields, so the UI shows one combined total.
  *
  * It never throws: a failed engine download leaves the model files alone and becomes `engine.state === 'failed'` with a retry
@@ -26,8 +26,12 @@ export function createEngineStep({ control, signal = null, onChange = () => {} }
     if (!control || typeof control.update !== 'function') { set({ state: 'skipped', message: 'This build has no component updater.' }); return { ...part }; }
     try {
       set({ state: 'checking', message: 'Checking the engine for this PC…' });
-      let usable = false;
-      try { usable = !!(await control.engine()).usable; } catch { /* treated as not usable */ }
+      const active = await control.engine().catch(() => null);
+      const usable = !!active?.usable;
+      if (usable && active.pinned) {
+        set({ state: 'current', version: active.engine?.version ?? null, message: 'The engine for this PC is ready.', percent: 100 });
+        return { ...part };
+      }
       let report = null;
       try {
         report = await control.updateCheck();
