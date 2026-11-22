@@ -90,7 +90,7 @@ test('runCli passes the arguments untouched (no shell) and reads JSON', async ()
 
 // ---------------------------------------------------------------------------------- native-control in packaged mode
 
-function packagedFixture({ engineUsable = true, updater = null, repair = false, ids = ['iq2_xs', 'iq3_s'], controlVersion = '0.1.45', extraSizes = [], cliStartWait = 'old', installPoll = null, rpcHook = null } = {}) {
+function packagedFixture({ engineUsable = true, updater = null, repair = false, ids = ['iq2_xs', 'iq3_s'], controlVersion = '0.1.45', extraSizes = [], cliStartWait = 'old', installPoll = null, rpcHook = null, onTuneConfig = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'strata-packaged-test-'));
   const install = join(root, 'install'), data = join(root, 'data');
   mkdirSync(install, { recursive: true });
@@ -158,6 +158,12 @@ function packagedFixture({ engineUsable = true, updater = null, repair = false, 
   let installJob = null;
   const spawnProcess = (command, args, options) => {
     spawned.push({ command, args, options });
+    if (onTuneConfig && args[1] === 'presets' && args[2] === 'status') {
+      onTuneConfig(JSON.parse(readFileSync(args[3], 'utf8')));
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      queueMicrotask(() => { child.stdout.emit('data', Buffer.from('{}')); child.emit('close', 0); });
+      return child;
+    }
     if (!String(args[0]).endsWith('strata_mcp.py')) throw new Error('no process but the installer may be started by the host in packaged mode: ' + command + ' ' + args.join(' '));
     const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null;
     child.kill = () => { child.exitCode = 0; queueMicrotask(() => child.emit('exit', 0)); return true; };
@@ -649,12 +655,13 @@ test('packaged: the app default of several requests at once and the memory retry
 
 test('packaged: a tune measures the engine a load starts: same start args, slots included, for the same model and profile', async () => {
   for (const vram of [11.9, 48]) {
-    const f = packagedFixture(); f.hardware.gpus[0].vram_gb = vram;
+    let tuned;
+    const f = packagedFixture({ onTuneConfig: config => { tuned = config; } }); f.hardware.gpus[0].vram_gb = vram;
     try {
       await f.native.refresh(true);
       const args = { model: 'iq2_xs', resourceProfile: 'work', vision: 'no' };
-      await f.native.tuneStatus(args).catch(() => {});      // the fake host cannot run Control's tuner; the config it would measure is written first
-      const tuned = JSON.parse(readFileSync(join(f.root, 'data', 'native-tune', 'iq2_xs.json'), 'utf8'));
+      await f.native.tuneStatus(args);
+      assert.ok(tuned, 'the tuner read its private config before cleanup');
       const job = await finish(f.native, f.native.operation('load', args).id);
       assert.equal(job.state, 'done', job.error);
       const loaded = { ...f.saved.at(-1) }; delete loaded.port; delete loaded.api_key;
