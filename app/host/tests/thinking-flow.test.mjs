@@ -1,5 +1,5 @@
 /**
- * #6120 (the owner): thinking is a piece of the reply, not a window pinned above it. A turn that thinks, works, thinks again and
+ * The owner's report: thinking is a piece of the reply, not a window pinned above it. A turn that thinks, works, thinks again and
  * answers keeps that order in `blocks`, so the thinking row appears where the model thought and the answer text where it wrote.
  * A reply whose thinking arrived as one whole string (a taken-over turn, an older chat) keeps the single block above.
  */

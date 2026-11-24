@@ -2,7 +2,7 @@
  * The engine comes with the model.
  *
  * A model install job (packaged app) also makes sure this PC has a usable engine: if none is installed, or the signed feed offers
- * a newer compatible one for an unpinned engine, the job runs Control's component updater (same feed, signature and hash checks, staged
+ * a newer compatible one, the job runs Control's component updater for the engine (same feed, signature and hash checks, staged
  * test start) next to the model files. It reports through the job's own progress fields, so the UI shows one combined total.
  *
  * It never throws: a failed engine download leaves the model files alone and becomes `engine.state === 'failed'` with a retry
@@ -26,12 +26,8 @@ export function createEngineStep({ control, signal = null, onChange = () => {} }
     if (!control || typeof control.update !== 'function') { set({ state: 'skipped', message: 'This build has no component updater.' }); return { ...part }; }
     try {
       set({ state: 'checking', message: 'Checking the engine for this PC…' });
-      const active = await control.engine().catch(() => null);
-      const usable = !!active?.usable;
-      if (usable && active.pinned) {
-        set({ state: 'current', version: active.engine?.version ?? null, message: 'The engine for this PC is ready.', percent: 100 });
-        return { ...part };
-      }
+      let usable = false;
+      try { usable = !!(await control.engine()).usable; } catch { /* treated as not usable */ }
       let report = null;
       try {
         report = await control.updateCheck();
@@ -40,6 +36,14 @@ export function createEngineStep({ control, signal = null, onChange = () => {} }
         throw error;
       }
       const engine = report.engine ?? {};
+      /* #6830: an engine the person chose or went back to (`strata components rollback`, Settings > Engine, `components use`) is pinned. A model's install or a change
+         of its settings never switches it: the job used to run the updater for the newer engine still on disk, which dropped the pin and the skipped list and put the
+         broken release back. The newer one stays offered in Settings > Engine and by `strata update`. */
+      if (engine.status === 'available' && (engine.person_chose === true || (usable && engine.pinned))) {   // person_chose: Control's own word for it (5907fe7ff); pinned alone covers a pin whose newer engine is not on disk
+        const here = engine.installed?.version ?? null, offered = engine.offered?.version ?? null;
+        set({ state: 'current', version: here, percent: 100, message: `The engine you chose${here ? ` (${here})` : ''} stays in use.${offered ? ` A newer one (${offered}) is offered: Settings > Engine switches to it.` : ''}` });
+        return { ...part };
+      }
       const wanted = engine.status === 'install' || engine.status === 'available';
       if (!wanted) {
         if (!usable && engine.status !== 'current') throw new Error(engine.reasons?.[0] ?? 'The update feed has no engine for this PC.');

@@ -2,13 +2,59 @@ import { tr } from '../lib/i18n';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Btn, Dialog, type IconName } from './ui';
 import { api } from '../lib/client';
+import { useImeKeys } from '../lib/ime-keys';
 import { plainFailureText } from '../lib/plain-errors';
 import { compactTokens, elapsed } from '../lib/chat-metrics';
-import type { Session } from '../lib/types';
+import type { Session, SessionAgentReply } from '../lib/types';
 import { helperRanLong } from '../lib/helper-limit';
 import { helperRecordsChanged, updateHelperRecords, type HelperAction, type HelperMessage, type HelperRecord } from '../lib/helper-records';
 
 type Agent = NonNullable<Session['agents']>[number];
+
+export interface HelperThreadItem {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  at?: string;
+  delivery?: 'queue' | 'steer';
+}
+
+/** Merge user-sent messages and helper replies into chronological order for the work view (#6516). */
+export function buildHelperThread(
+  messages: HelperMessage[],
+  replies?: SessionAgentReply[],
+  steps?: Agent['steps'],
+): HelperThreadItem[] {
+  const userItems = messages.map((m, idx) => ({
+    id: `u:${m.id}`,
+    role: 'user' as const,
+    text: m.text,
+    at: m.at,
+    delivery: m.delivery,
+    ts: Date.parse(m.at) || 0,
+    order: idx,
+  }));
+  const assistantSource = replies?.length
+    ? replies.map((r, idx) => ({
+      id: `a:${r.id}`,
+      role: 'assistant' as const,
+      text: r.text,
+      at: r.at,
+      ts: Date.parse(r.at) || 0,
+      order: idx,
+    }))
+    : (steps ?? []).filter(s => typeof s.said === 'string' && s.said.trim()).map((s, idx) => ({
+      id: `s:${idx}`,
+      role: 'assistant' as const,
+      text: s.said!,
+      at: undefined,
+      ts: Number.MAX_SAFE_INTEGER - 1000 + idx,
+      order: idx,
+    }));
+  return [...userItems, ...assistantSource]
+    .sort((a, b) => (a.ts !== b.ts ? a.ts - b.ts : a.role === b.role ? a.order - b.order : a.role === 'user' ? -1 : 1))
+    .map(({ ts: _ts, order: _order, ...item }) => item);
+}
 
 const states: Record<Agent['status'], { label: string; icon: IconName }> = {
   working: { label: 'In progress', icon: 'clock' },
@@ -18,13 +64,15 @@ const states: Record<Agent['status'], { label: string; icon: IconName }> = {
   cancelled: { label: 'Cancelled', icon: 'x' },
 };
 
-export function SubagentRow({ agent: a, now = Date.now(), sessionId, record, onRemove, panel = false }: {
+export function SubagentRow({ agent: a, now = Date.now(), sessionId, record, onRemove, onOpenWork, panel = false }: {
   agent: Agent;
   now?: number;
   /** The chat the helper belongs to: with it the row can take a message for the helper (#4749). */
   sessionId?: string;
   record?: HelperRecord;
   onRemove?: () => void;
+  /** Opens this helper's standalone work view surface (#6516). */
+  onOpenWork?: () => void;
   panel?: boolean;
 }) {
   const [log, setLog] = useState(false);
@@ -36,6 +84,7 @@ export function SubagentRow({ agent: a, now = Date.now(), sessionId, record, onR
   const [updating, setUpdating] = useState(false);
   const [problem, setProblem] = useState('');
   const [stopping, setStopping] = useState(false);
+  const ime = useImeKeys();
   const logRef = useRef<HTMLOListElement>(null);
   const followLog = useRef(true);
   const seenLog = useRef<string | null>(null);
@@ -98,10 +147,26 @@ export function SubagentRow({ agent: a, now = Date.now(), sessionId, record, onR
   const canMessage = !!sessionId && !archived && a.status !== 'cancelled';
   const savedMessages = record?.messages ?? [];
   const messages = [...savedMessages, ...sentMessages.filter(message => !savedMessages.some(saved => saved.id === message.id))];
-  const messageHistory = messages.length ? <section className="subagent-messages" aria-label={tr('Messages to this helper')}>
-    <h2>{tr('Messages to this helper')}</h2>
-    <ol>{messages.map(message => <li key={message.id}>{message.text}</li>)}</ol>
+  const thread = buildHelperThread(messages, a.replies, a.steps);
+  const threadHistory = thread.length ? <section className="subagent-messages subagent-thread" aria-label={tr('Helper conversation')}>
+    <h2>{tr('Conversation')}</h2>
+    <ol>{thread.map(item => <li key={item.id} className={`subagent-thread__item subagent-thread__item--${item.role}`}>
+      <div className="subagent-thread__meta">
+        <strong>{item.role === 'user' ? tr('You') : a.name}</strong>
+        {item.delivery && <span className="subagent-thread__badge">{tr(item.delivery === 'steer' ? 'Live steer' : 'Follow-up')}</span>}
+        {item.at && <time dateTime={item.at}>{new Date(item.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time>}
+      </div>
+      <div className="subagent-thread__text">{item.text}</div>
+    </li>)}</ol>
   </section> : null;
+  const replyForm = canMessage ? <form className="subagent-row__reply" onSubmit={e => { e.preventDefault(); void send(); }}>
+    <textarea className="st-input" rows={2} value={draft} maxLength={8000}
+      aria-label={tr('Message to {0}', [a.name])} placeholder={tr('Write to {0}…', [a.name])}
+      disabled={busy || updating} onChange={e => { setDraft(e.target.value); setSent(false); }}
+      {...ime.events}
+      onKeyDown={e => { if (ime.owns(e)) return; if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }}/>
+    <Btn size="sm" variant="primary" type="submit" disabled={busy || updating || !draft.trim()}>{tr('Send')}</Btn>
+  </form> : null;
   // ChildProjector merges consecutive text chunks into one step. Its count can
   // stay unchanged while the visible log grows, so follow the rendered content,
   // not merely the number of list items.
@@ -109,7 +174,14 @@ export function SubagentRow({ agent: a, now = Date.now(), sessionId, record, onR
   function showLog() {
     followLog.current = true;
     seenLog.current = null;
-    setLog(true);
+    if (onOpenWork) onOpenWork();
+    else setLog(true);
+  }
+  function onRowClick(e: React.MouseEvent<HTMLDivElement>) {
+    if (panel) return;
+    const target = e.target as Element | null;
+    if (target?.closest('button, input, textarea, a, form, [role="dialog"]')) return;
+    showLog();
   }
   // A helper window opens on its current work, not on an old first step. Keep
   // following new work only while the reader has stayed at the end, so looking
@@ -132,7 +204,7 @@ export function SubagentRow({ agent: a, now = Date.now(), sessionId, record, onR
       : <><strong>{tr(step.verb ?? '')}</strong> <span>{step.target ?? ''}</span></>}</li>)}
   </ol> : null;
 
-  return <div className="subagent-row" data-status={a.status} data-panel={panel || undefined}>
+  return <div className={`subagent-row${!panel ? ' subagent-row--clickable' : ''}`} data-status={a.status} data-panel={panel || undefined} onClick={onRowClick}>
     <span className="subagent-row__dot" aria-label={tr(state.label)}/>
     <div className="subagent-row__copy">
       <div className="subagent-row__title">
@@ -149,22 +221,20 @@ export function SubagentRow({ agent: a, now = Date.now(), sessionId, record, onR
           onClick={() => void changeArchive(archived ? 'restore' : 'archive')}>{tr(archived ? 'Restore' : 'Archive')}</Btn>}
         {onRemove && !canStop && <Btn size="sm" variant="ghost" disabled={updating || busy} onClick={onRemove}>{tr('Remove')}</Btn>}
       </div>
-      {canMessage && (panel || writing) && <form className="subagent-row__reply" onSubmit={e => { e.preventDefault(); void send(); }}>
-        <textarea className="st-input" rows={2} value={draft} maxLength={8000}
-          aria-label={tr('Message to {0}', [a.name])} placeholder={tr('Write to {0}…', [a.name])}
-          disabled={busy || updating} onChange={e => { setDraft(e.target.value); setSent(false); }}/>
-        <Btn size="sm" variant="primary" type="submit" disabled={busy || updating || !draft.trim()}>{tr('Send')}</Btn>
-      </form>}
+      {!panel && writing && replyForm}
       {tr(helperRanLong(a.status, duration) ? <p className="small subagent-row__note" role="status">{tr("This helper has been working for over 30 minutes.")}</p> : null)}
       {tr(sent ? <p className="small subagent-row__note" role="status">{tr('Sent to {0}.', [a.name])}</p> : null)}
       {tr(problem ? <p className="small inline-error subagent-row__note" role="alert">{problem}</p> : null)}
     </div>
     <div className="subagent-row__metrics"><span>{tr(compactTokens(a.tokens))}{tr(' tok')}</span><span>{tr(elapsed(duration))}</span></div>
-    {panel ? <>{messageHistory}{logEntries}</> : <Dialog open={log} title={tr('{0} · log', [a.name])} onClose={() => setLog(false)} actions={<Btn onClick={() => setLog(false)}>{tr('Done')}</Btn>}>
+    {panel ? <>{threadHistory}{logEntries}<div className="subagent-work__composer">{replyForm}</div></> : !onOpenWork && <Dialog open={log} title={tr('{0} · log', [a.name])} wide onClose={() => setLog(false)} actions={<>{sessionId && canStop && <Btn size="sm" variant="danger" disabled={stopping} onClick={() => void stop()}>{tr(stopping ? 'Stopping…' : 'Stop helper')}</Btn>}<Btn onClick={() => setLog(false)}>{tr('Done')}</Btn></>}>
       <p>{a.description}</p>
-      <p className="small muted">{tr('Status: ')}{tr(state.label)} · {tr(elapsed(a.durationMs))} · {tr(compactTokens(a.tokens))}{tr(' tokens')}</p>
-      {messageHistory}
+      <p className="small muted">{tr('Status: ')}{tr(state.label)} · {tr(elapsed(duration))} · {tr(compactTokens(a.tokens))}{tr(' tokens')}</p>
+      {threadHistory}
       {logEntries}
+      {replyForm}
+      {tr(sent ? <p className="small subagent-row__note" role="status">{tr('Sent to {0}.', [a.name])}</p> : null)}
+      {tr(problem ? <p className="small inline-error subagent-row__note" role="alert">{problem}</p> : null)}
     </Dialog>}
   </div>;
 }

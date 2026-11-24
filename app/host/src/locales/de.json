@@ -3610,6 +3610,20 @@
   "contextOptimizerExperimental": "Context Optimizer (experimental)",
   "ramReserveHint": "Hält beim Laden lokaler Modelle Arbeitsspeicher frei. Gilt für alle Profile ab dem nächsten Laden.",
   "ramReserveCustom": "Eigener Wert für freien Arbeitsspeicher (GiB)",
-  "ramReserveInvalid": "Gib eine ganze Zahl größer als null ein oder wähle Automatisch.",
-  "ramReserveSaved": "Gespeichert"
+  "ramReserveInvalid": "Geben Sie eine ganze Zahl größer als null ein oder wählen Sie Automatisch.",
+  "ramReserveSaved": "Gespeichert",
+  "subagentWorkingCount": "{0} aktiv, {1} nicht aktiv",
+  "subagentWorkingSlash": "{0} aktiv / {1} nicht aktiv",
+  "subagentWorkingDetail": "aktiv ·",
+  "subagentNotWorkingDetail": "inaktiv ·",
+  "subagentWorkTitle": "{0} · Arbeit",
+  "subagentConversationLabel": "Helfer-Gespräch",
+  "subagentConversationHead": "Gespräch",
+  "subagentYou": "Sie",
+  "modelPortLabel": "Modellserver-Port",
+  "modelPortAria": "Modellserver-Port (leer = automatisch)",
+  "modelPortActive": "Aktiver Modellport: {0}.",
+  "modelPortHint": "Der Startport für lokale Modellserver (Standard 18500). Leer lassen für automatisch; Strata vermeidet Anfragen an Port 8080, um Konflikte mit lokalen Anwendungen wie Spring Boot zu verhindern. Gilt beim nächsten Laden eines Modells.",
+  "promptCacheSpreadLabel": "Prompt-Cache-Prüfpunkte verteilen",
+  "promptCacheSpreadHint": "Übergibt --prompt-cache-spread an lokale Modelle, sodass Prüfpunkte über lange Gespräche verteilt bleiben statt sich am Ende zu häufen. Benötigt gleich viel RAM und verkürzt das erneute Einlesen bei der Verdichtung auf Hybridmodellen. Gilt beim nächsten Laden eines Modells."
 }

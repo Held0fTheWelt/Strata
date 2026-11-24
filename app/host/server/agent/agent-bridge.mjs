@@ -30,6 +30,7 @@ import { nearestBudget } from './llm-shape.mjs';
 import { DeliverableTracker, ActivityGroups, FolderClaims } from './deliverables.mjs';
 import { SkillsUsed, skillInfoFrom } from './skills-used.mjs';
 import { turnEngineSpeed } from './engine-speed.mjs';
+import { engineKeepsTurnAlive } from './engine-progress.mjs';
 import { TurnGuard, GoalGuard, guardNote, GUARD_NOTES } from './turn-guard.mjs';
 import { ProgressGuard } from './progress-guard.mjs';
 import { requirementOf, StepEvidence } from './plan-brief.mjs';
@@ -157,7 +158,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
  * @param {string} [options.nodePath]                   the Node runtime that runs the Harness
  * @param {(line:string)=>void} [options.log]
  */
-export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = null, gate = true, localInstances, connections, tools = () => undefined, defaultLocalId = () => null, skillsDir = () => null, onGoal = () => {}, onPlan = () => {}, onQueue = () => {}, onWake = () => {}, proxyBase = null, searchMock = null, expertSampling = () => null, engineProgress = () => null, engineGraceMs = 30 * 60_000, helperLimitMs = () => 0, contextOptimizer = () => null, stallMs = 4 * 60_000, stallToolMs = 20 * 60_000, env = process.env, nodePath = process.execPath, log = () => {}, liveMs = 90_000, startRuntimeImpl = null, startTimeoutMs = 120_000, sessionReadyMs = 60_000, sessionRetryMs = 1_500, restartWaitMs = 120_000, controlRpcMs = 15_000, helperStopMs = 10_000 }) {
+export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = null, gate = true, localInstances, connections, tools = () => undefined, defaultLocalId = () => null, skillsDir = () => null, onGoal = () => {}, onPlan = () => {}, onQueue = () => {}, onWake = () => {}, proxyBase = null, searchMock = null, expertSampling = () => null, engineProgress = () => null, engineGraceMs = 2 * 60 * 60_000, helperLimitMs = () => 0, contextOptimizer = () => null, stallMs = 4 * 60_000, stallToolMs = 20 * 60_000, env = process.env, nodePath = process.execPath, log = () => {}, liveMs = 90_000, startRuntimeImpl = null, startTimeoutMs = 120_000, sessionReadyMs = 60_000, sessionRetryMs = 1_500, restartWaitMs = 120_000, controlRpcMs = 15_000, helperStopMs = 10_000 }) {
   const boundedRpc = (runtime, method, args, signal = null) => {
     const deadline = AbortSignal.timeout(controlRpcMs);
     const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
@@ -567,7 +568,8 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     setupSignal.throwIfAborted();
     c.holding = true;   // this chat now works on `runtime`: a restart of the Harness waits for it (busyChats); cleared when its turn exists or the start ends (runTurn)
     const made = await beforeAbort(() => sessionFor(c, workspacePath, runtime, {
-      signal: setupSignal, vision: route.vision,
+      vision: route.vision,
+      signal: setupSignal,
       onWait: () => reporter.set({ phase: 'starting', code: 'assistant-starting', text: 'Starting the assistant…' }),
     }), setupSignal);
     const { sessionId, fresh } = made ?? {};
@@ -576,10 +578,10 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
 
     // The model and the chat's thinking level (the Reasoning menu) are sent to the Harness when either changed. A level the route does
     // not have (an API model with its own vocabulary) is dropped and the model's own default stands: never an error for the person.
-    const isHy4Route = route.kind === 'local' && /^hy4-flash/i.test(String(route.modelId ?? ''));
-    const isInklingRoute = route.kind === 'local' && /^inkling-2-mini/i.test(String(route.modelId ?? ''));
-    const rawLevel = isInklingRoute ? 'off' : effortOf(thinking ?? (isHy4Route ? 'High' : 'Medium'));
-    const level = isInklingRoute ? 'off' : (isHy4Route && (rawLevel === 'low' || rawLevel === 'medium' || rawLevel === 'minimal') ? 'high' : rawLevel);
+    const isHy4Route = route.kind === 'local' && /^hy4-flash/i.test(String(route.modelId ?? '')) || (route.kind === 'local' && route.arch === 'hy4flash');
+    const isInklingRoute = route.kind === 'local' && (/^inkling-2-mini/i.test(String(route.modelId ?? '')) || route.arch === 'inkling2_loop');
+    const rawLevel = effortOf(thinking ?? (isHy4Route ? 'High' : isInklingRoute ? 'Low' : 'Medium'));   // Inkling's default level is Low (0.2.21)
+    const level = (isHy4Route && (rawLevel === 'low' || rawLevel === 'medium' || rawLevel === 'minimal') ? 'high' : rawLevel);
     // Response settings the Harness cannot send itself (the thinking budget, the Expert sampling) go through this host's forwarding
     // endpoint, on a copy of the route; with every setting at its default the route is used directly, as before.
     const budget = level === 'off' ? 0 : nearestBudget(thinkingBudget);
@@ -693,6 +695,8 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
           void turn.stopChild(h).catch(e => log(`agent · helper limit: ${e.message}`));
         }
       }
+      const waitingForUser = [...questions.values()].some(q => q.chatId === chatId);
+      if (waitingForUser) { turn.lastActivity = Date.now(); return; }
       const toolRunning = [...projector.tools.values()].some(x => x.card?.state === 'running' || x.card?.state === 'proposed') || pending.size > 0 && pendingFor(chatId).length > 0;
       const limit = toolRunning ? stallToolMs : stallMs;
       const endStalled = sinceMs => {
@@ -713,10 +717,11 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       }
       // A local engine reading a long prompt sends the Harness nothing for minutes (#3623). Its /metrics progress counts as activity,
       // for at most engineGraceMs after the Harness last spoke: progress for another chat cannot keep a lost turn alive forever.
-      if (turn.route?.kind === 'local' && Date.now() - turn.heard < engineGraceMs) {
+      // The mark counts every sampled token, a thinking model's hidden ones too, and a busy engine whose mark has not moved yet (one slow prompt chunk) keeps the turn alive for ENGINE_QUIET_MS (#6794).
+      if (turn.route?.kind === 'local') {
         let mark = null;
         try { mark = engineProgress(turn.route.instanceId); } catch { /* no progress known: the Harness alone decides */ }
-        if (mark != null && mark !== turn.engineMark) { turn.engineMark = mark; turn.lastActivity = Date.now(); return; }
+        if (engineKeepsTurnAlive(turn, mark, { graceMs: engineGraceMs })) return;
       }
       if (Date.now() - turn.lastActivity < limit) return;
       endStalled(Date.now() - turn.lastActivity);
@@ -726,7 +731,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       if (turn.finished) return;
       turn.finished = true;
       turn.snapshot.resolve();
-      for (const [k, v] of questions) if (v.chatId === chatId) questions.delete(k);
+      for (const [k, v] of questions) if (v.chatId === chatId) { questions.delete(k); emit({ type: 'agent-question-end', callId: v.callId }); }
       for (const [k, v] of pending) if (v.sessionId === sessionId) pending.delete(k);
       clearTimeout(turn.settleTimer);
       clearTimeout(turn.stopDeadline);
@@ -1642,6 +1647,7 @@ ${note.text}
     const outcome = skip ? 'next' : buildAnswer(entry.items, answers);
     await rt.gw.answerEvent({ clientId: entry.clientId ?? rt.clientId, eventId: entry.eventId, outcome });
     questions.delete(key);
+    chats.get(chatId)?.turn?.announceQuestion?.({ type: 'agent-question-end', callId });
     return { ok: true, skipped: !!skip };
   }
 
@@ -1653,6 +1659,34 @@ ${note.text}
    * (or is between steps) a new turn. The Harness refuses a helper that cannot take messages (a one-shot one) and a parent that is not live;
    * either comes back as a plain sentence.
    */
+  /** Follow a continuable helper that received a follow-up while its parent chat is idle (#6516). */
+  function watchIdleHelper(c, runtime, parentSessionId, helperId) {
+    c.idleHelpers ??= new Map();
+    const existing = c.idleHelpers.get(helperId);
+    if (existing && !existing.done) return existing;
+    const prev = c.last?.agents?.find(a => a.id === helperId);
+    const cp = new ChildProjector({ id: helperId, name: prev?.name ?? 'Helper', task: prev?.description ?? '' });
+    if (Array.isArray(prev?.steps)) cp.steps = prev.steps.slice(-20);
+    if (Array.isArray(prev?.replies)) cp.replies = prev.replies.slice(-50);
+    const entry = { id: helperId, parentSessionId, cp, done: false, close: null };
+    c.idleHelpers.set(helperId, entry);
+    const syncLast = () => {
+      const snap = cp.agent();
+      if (c.last) {
+        const list = Array.isArray(c.last.agents) ? c.last.agents : [];
+        const at = list.findIndex(a => a.id === helperId);
+        c.last.agents = at >= 0 ? list.map((a, i) => i === at ? snap : a) : [...list, snap];
+      }
+    };
+    const stream = runtime.gw.follow(helperId, item => {
+      cp.consume(item);
+      syncLast();
+      if (cp.finished) { entry.done = true; stream?.close?.(); }
+    }, () => { entry.done = true; });
+    entry.close = () => { entry.done = true; stream?.close?.(); };
+    return entry;
+  }
+
   async function messageHelper({ chatId, helperId, text, delivery = 'queue' }) {
     allowWork();
     const clean = String(text ?? '').trim().slice(0, 8000);
@@ -1662,7 +1696,10 @@ ${note.text}
     if (!parent || !rt?.hp.running) throw new AgentUnavailable('The assistant is not running in this chat, so it cannot pass a message on. Send a message in the chat first.', 'helper-idle');
     try {
       const receipt = await rt.gw.rpc('subagents/prompt', { request: { requestId: `helper-${randomUUID()}`, parentSessionId: parent, childSessionId: String(helperId), mode: 'continuable', delivery: delivery === 'steer' ? 'steer' : 'queue', content: [{ type: 'text', text: clean }] } });
-      chats.get(chatId)?.turn?.children.get(String(helperId))?.guard.newInstruction();
+      const c = chat(chatId);
+      const liveChild = c.turn?.children.get(String(helperId));
+      if (liveChild) liveChild.guard.newInstruction();
+      else if (typeof rt.gw.follow === 'function') watchIdleHelper(c, rt, parent, String(helperId));
       return { ok: true, messageId: receipt?.messageId ?? null, delivery: delivery === 'steer' ? 'steer' : 'queue' };
     } catch (e) {
       log(`agent · message for a helper refused: ${String(e?.message ?? e).slice(0, 200)}`);
@@ -1671,11 +1708,21 @@ ${note.text}
   }
 
   async function stopHelper({ chatId, helperId }) {
-    const turn = chats.get(chatId)?.turn;
-    const child = turn?.children.get(String(helperId ?? ''));
-    if (!turn || !child || child.done || !rt?.hp.running) throw new AgentUnavailable('This helper has already finished or is no longer running.', 'helper-gone');
-    await turn.stopChild(child);
-    return { ok: true };
+    const c = chats.get(chatId);
+    const id = String(helperId ?? '');
+    const turn = c?.turn;
+    const child = turn?.children.get(id);
+    if (turn && child && !child.done && rt?.hp.running) {
+      await turn.stopChild(child);
+      return { ok: true };
+    }
+    const idle = c?.idleHelpers?.get(id);
+    if (idle && !idle.done && rt?.hp.running) {
+      await interruptChild(rt, idle.parentSessionId, id);
+      idle.close?.();
+      return { ok: true };
+    }
+    throw new AgentUnavailable('This helper has already finished or is no longer running.', 'helper-gone');
   }
 
   // -- messages typed while a goal runs ----------------------------------------------------------------------
@@ -2083,7 +2130,10 @@ ${note.text}
 
   function helperState(chatId, helperId) {
     const c = chats.get(chatId);
-    return c?.turn?.children.get(helperId)?.cp.agent() ?? c?.last?.agents?.find(a => a.id === helperId) ?? null;
+    return c?.turn?.children.get(helperId)?.cp.agent()
+      ?? c?.idleHelpers?.get(helperId)?.cp.agent()
+      ?? c?.last?.agents?.find(a => a.id === helperId)
+      ?? null;
   }
 
   return { prepareForUpdate, compactCommand, messageHelper, stopHelper, helperState, answerQuestion, goalState, goalControl, harnessDir, status, turnOf, runningTurns, wokenTurns, attach, runTurn, goalCommand, planCommand, researchCommand, llmTarget, noteToolMarker, setPlanBriefing, resetSession, reopenPlan, skipStep, planGoal, planControl, planState, steerMessage, queueMessage, cancelQueued, takeQueue, forget, approve, setMode, stop, pendingFor, pendingAll, close, sessionOf: chatId => sessionMap[chatId]?.sessionId ?? null, workingFolder: chatId => sessionMap[chatId]?.cwd ?? null, isRunning: chatId => !!chats.get(chatId)?.turn, _debug: () => ({ rt, sessionMap }) };

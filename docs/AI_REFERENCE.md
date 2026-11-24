@@ -1,6 +1,6 @@
 # Strata reference for AI tools and automated readers
 
-Last reviewed: 7 November 2026 against the 0.2.19 release tree (app and Terminal 0.2.19; Control 0.1.65, engines 0.1.65).
+Last reviewed: 7 November 2026 against the 0.2.21 release tree (app and Terminal 0.2.21; Control 0.1.67, engines 0.1.67).
 App, Control and engine versions differ; use the release notes and the installed component information. This page
 holds the technical context behind the short [README](../README.md). Use [AI_SETUP.md](AI_SETUP.md) to install Strata for a user,
 [AGENTS.md](../AGENTS.md) for repository work, and [MEDIA_KIT.md](MEDIA_KIT.md) for articles or videos.
@@ -10,8 +10,8 @@ holds the technical context behind the short [README](../README.md). Use [AI_SET
 - Strata runs supported language models locally, with a desktop app, a terminal app, and an inference engine.
 - The engine uses the GPU, system RAM and, for applicable models and memory modes, SSD storage.
   See [how it works](HOW_IT_WORKS.md) and [engine details](DETAILS.md).
-- There is one app installer per system (`Strata-0.2.19-windows-x64-setup.exe`, `Strata-0.2.19-linux-x86_64.AppImage`,
-  `Strata-0.2.19-macos-arm64.dmg`). The Windows and Linux installers carry no engine: the app downloads the engine for the
+- There is one app installer per system (`Strata-0.2.21-windows-x64-setup.exe`, `Strata-0.2.21-linux-x86_64.AppImage`,
+  `Strata-0.2.21-macos-arm64.dmg`). The Windows and Linux installers carry no engine: the app downloads the engine for the
   graphics card on first start, or installs a file the user already has. The Mac dmg keeps its Metal engine inside.
   The Terminal's `strata launch` downloads the appropriate engine and model.
   See [installation](INSTALL.md) and [Terminal launch](TERMINAL_LAUNCH.md).
@@ -120,8 +120,8 @@ See [connection instructions and limits](TERMINAL_LAUNCH.md#connect-your-apps-st
 
 Set `STRATA_AGENT_WORKING_MEMORY=1` in the Strata host environment to try working memory. Restart the host to pick up the setting.
 On the next user message in an existing agent chat, the Harness can add a short brief from that session's saved events and active jobs.
-It includes earlier requests, open checklist items, and recent tool outcomes with their source and time. On a resumed edit,
-the agent reads the current file and constructs the edit from that read. The Harness checks the file version before writing.
+It includes earlier requests, open checklist items, and recent tool outcomes with their source and time. The brief asks the
+agent to read a file it touched before changing it again; the Harness refuses an edit to a file that changed since it was read.
 
 ## Plan step briefs
 

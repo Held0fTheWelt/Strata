@@ -21,7 +21,7 @@ test('the budget travels from the menu to the request', () => {
   assert.match(host, /thinkingBudget:Number\.isInteger\(body\.thinkingBudget\)/);
 });
 
-/* #6120 (the owner's report): the Thinking row and the work log were missing while a turn worked. */
+/* The owner's report: the Thinking row and the work log were missing while a turn worked. */
 const chat = readFileSync(new URL('../src/screens/Chat.tsx', import.meta.url), 'utf8');
 const status = readFileSync(new URL('../server/agent/status.mjs', import.meta.url), 'utf8');
 

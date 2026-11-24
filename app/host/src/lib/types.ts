@@ -10,6 +10,8 @@ export interface SoftwareUpdate {
   message: string;
   /** The technical reason behind `message`, shown only behind the Details disclosure. */
   details?: string;
+  /** Windows desktop update path / custom-launcher profile warning surfaced before updating (#6573). */
+  installPathWarning?: string;
 }
 export interface UpdateCheckResult { checkedAt: string; strata: SoftwareUpdate; engine: SoftwareUpdate }
 
@@ -439,6 +441,12 @@ export interface Workspace {
   aliases?: string[];
 }
 
+export interface SessionAgentReply {
+  id: string;
+  text: string;
+  at: string;
+}
+
 export interface SessionAgent {
   id: string;
   name: string;
@@ -450,6 +458,8 @@ export interface SessionAgent {
   updatedAt?: number;
   /** What the helper did, newest last (at most 20, short): a tool it used ({ verb, target }) or words it wrote ({ said }). Shown by View log (#5254). */
   steps?: { verb?: string; target?: string; said?: string }[];
+  /** Structured assistant replies from this helper, in order (#6516). */
+  replies?: SessionAgentReply[];
 }
 
 export type ChatMode = 'auto' | 'manual' | 'accept-edits' | 'plan' | 'bypass';

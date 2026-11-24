@@ -64,7 +64,7 @@ test('status: clear says idle once and then nothing more is sent', () => {
   assert.equal(frames.length, 2);
 });
 
-test('status: a turn that says nothing new for 8 s still says that it is going (#6120)', () => {
+test('status: a turn that says nothing new for 8 s still says that it is going', () => {
   const { reporter, frames, advance } = rig();
   const same = { phase: 'tool', code: 'tool', text: 'Running a command…', args: { tool: 'pwsh' } };
   reporter.set(same);

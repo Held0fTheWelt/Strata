@@ -3,26 +3,17 @@ import assert from 'node:assert/strict';
 import { createEngineStep } from '../server/engine-step.mjs';
 
 const GB = 1e9;
-function control({ usable = false, pinned = null, check, update, checkError = null } = {}) {
+function control({ usable = false, check, update, checkError = null } = {}) {
   const calls = [];
   return {
     calls,
-    async engine() { calls.push('engine'); return { usable, pinned }; },
+    async engine() { calls.push('engine'); return { usable }; },
     async updateCheck() { calls.push('updateCheck'); if (checkError) throw new Error(checkError); return check; },
     async update(options) { calls.push(['update', options.engine, options.control]); return update(options); },
   };
 }
 const offer = (status = 'install', extra = {}) => ({ engine: { status, installed: null, offered: { version: '0.1.46' }, download_bytes: 0.5 * GB, ...extra } });
 const updated = { ok: true, results: [{ component: 'engine', status: 'updated', installed_after: { version: '0.1.46' } }] };
-
-test('a model download keeps a usable pinned engine without querying the update feed', async () => {
-  const c = control({ usable: true, pinned: '0.1.62.1-windows-x86_64-hip-rx9070-cache' });
-  const step = createEngineStep({ control: c });
-  const part = await step.run();
-  assert.equal(part.state, 'current');
-  assert.equal(step.summaryNote(), null);
-  assert.deepEqual(c.calls, ['engine']);
-});
 
 test('no engine installed: the step downloads it with the model and reports the stages in order', async () => {
   const seen = [];
@@ -114,6 +105,41 @@ test('#4823: an engine that already works is not replaced without saying from wh
   assert.match(messages.find(m => /Updating/.test(m)), /^Updating the engine from 0\.1\.54 to 0\.1\.55\. The engine you have now is kept, and Settings can go back to it\.$/);
   assert.ok(messages.includes('Updating the engine from 0.1.54 to 0.1.55: 30%'));
   assert.equal(part.message, 'The engine was updated from 0.1.54 to 0.1.55. Settings can go back to the one you had.');
+});
+
+test('#6830: a pinned engine (rolled back to, or chosen in Settings) is never replaced by a model install or a settings change', async () => {
+  const c = control({
+    usable: true,
+    check: offer('available', { installed: { version: '0.1.64' }, offered: { version: '0.1.66' }, pinned: '0.1.64-windows-x86_64-cuda-cuda13' }),
+    update: async () => { throw new Error('the updater must not run'); },
+  });
+  const messages = [];
+  const part = await createEngineStep({ control: c, onChange: p => messages.push(p.message) }).run();
+  assert.deepEqual(c.calls, ['engine', 'updateCheck'], 'no update call');
+  assert.equal(part.state, 'current');
+  assert.equal(part.version, '0.1.64');
+  assert.equal(part.message, 'The engine you chose (0.1.64) stays in use. A newer one (0.1.66) is offered: Settings > Engine switches to it.');
+  // not pinned: the behaviour of #4823 is unchanged
+  const free = control({ usable: true, check: offer('available', { installed: { version: '0.1.54' }, offered: { version: '0.1.55' }, pinned: null }), update: async () => ({ ok: true, results: [{ component: 'engine', status: 'updated', installed_after: { version: '0.1.55' } }] }) });
+  assert.equal((await createEngineStep({ control: free }).run()).state, 'done');
+  // pinned but no engine usable at all: it is still fetched
+  const none = control({ usable: false, check: offer('install', { pinned: '0.1.64-x' }), update: async () => updated });
+  assert.equal((await createEngineStep({ control: none }).run()).state, 'done');
+});
+
+test('#6830 (the word of the Control side): person_chose after a rollback keeps the engine in use and its pin; a settings save never calls the updater', async () => {
+  const c = control({
+    usable: true,
+    check: offer('available', { installed: { version: '0.1.64' }, offered: { version: '0.1.66' }, person_chose: true, installed_locally: '0.1.66', note: 'you went back to 0.1.64' }),
+    update: async () => { throw new Error('the updater must not run: it would drop the pin and the skip'); },
+  });
+  const part = await createEngineStep({ control: c }).run();
+  assert.deepEqual(c.calls, ['engine', 'updateCheck']);
+  assert.equal(part.state, 'current');
+  assert.equal(part.version, '0.1.64');
+  // the same check without it (nobody went back): the update with the model goes on as before
+  const free = control({ usable: true, check: offer('available', { installed: { version: '0.1.64' }, offered: { version: '0.1.66' } }), update: async () => ({ ok: true, results: [{ component: 'engine', status: 'updated', installed_after: { version: '0.1.66' } }] }) });
+  assert.equal((await createEngineStep({ control: free }).run()).state, 'done');
 });
 
 test('a first engine keeps the plain download words', async () => {

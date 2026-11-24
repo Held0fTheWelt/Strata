@@ -8,8 +8,7 @@ import { nativeAction, type NativeState } from '../lib/native';
  *  person with an older engine is told (#4848). */
 export const engineUpdateOffered = (native: NativeState | null | undefined) => {
   const offer = native?.engine?.updateAvailable;
-  const usingPinnedEngine = native?.engine?.usable && native.engine.pinned;
-  return !!(offer && offer.engine) && !usingPinnedEngine;
+  return !!(offer && offer.engine);
 };
 
 /** One card, plain words, one button. The update itself is the existing "Update engine" job (its progress shows where every job's does); models are not touched. */
