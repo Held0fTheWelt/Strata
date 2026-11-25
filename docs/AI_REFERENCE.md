@@ -131,6 +131,17 @@ A successful Read of that exact line is required to advance the plan. A live mes
 the active step's check. Resume tries the step again if the required read was missing. The plan retains the receipt
 with the file, line number, time and tool call.
 
+## Agent experience across chats
+
+Set `STRATA_AGENT_EXPERIENCE=1` in the Strata host environment to try it. Restart the host to pick up the setting.
+When a shell command in an agent chat fails and later succeeds after the agent changed files, Strata keeps a short case on this
+computer: which script or tool ran, the normalized error lines, and the files the fix changed. If the same command later fails in
+a similar way, in that chat or another one, the agent's next request includes one note about the earlier fix. The note is
+marked as historical evidence, not an instruction. It never blocks or changes a command. In a replay of recorded sessions,
+21 of 38 such notes pointed at the right files. The cases are in `data/agent/experience/cases.jsonl` under the Strata home,
+at most 2000; delete that folder to remove them. The conditions, measurements and limits are in the
+[agent bridge notes](../app/host/server/agent/README.md).
+
 ## Evidence and publishing
 
 - Cite the release, commit and relevant guide behind each compatibility claim.
